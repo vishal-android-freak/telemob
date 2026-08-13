@@ -27,6 +27,7 @@ export type TerminalSessionSnapshot = {
   error: string;
   lines: TerminalLine[];
   alternateScreen: boolean;
+  mouseTracking: boolean;
   generation: number;
 };
 
@@ -75,6 +76,7 @@ class TerminalSessionManager {
     error: this.error,
     lines: this.lines,
     alternateScreen: this.terminal.buffer.active.type === 'alternate',
+    mouseTracking: this.terminal.modes.mouseTrackingMode !== 'none',
     generation: this.generation,
   });
 

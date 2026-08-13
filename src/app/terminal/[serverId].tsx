@@ -145,6 +145,14 @@ export default function TerminalScreen() {
     applyTerminalSize(viewport.width, viewport.height, session.alternateScreen);
   }, [applyTerminalSize, session.alternateScreen]);
 
+  useEffect(() => {
+    if (session.mouseTracking) {
+      scrollRef.current?.scrollTo({ y: 0, animated: false });
+    } else {
+      scrollRef.current?.scrollToEnd({ animated: false });
+    }
+  }, [session.mouseTracking]);
+
   async function submitCommand() {
     if (!connected || !command) return;
     const value = `${command}\r`;
@@ -314,6 +322,13 @@ export default function TerminalScreen() {
     });
   }
 
+  function dismissTerminalKeyboard() {
+    directInputFocusedRef.current = false;
+    directInputRef.current?.blur();
+    lineInputRef.current?.blur();
+    Keyboard.dismiss();
+  }
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAvoidingView
@@ -376,12 +391,23 @@ export default function TerminalScreen() {
             <ScrollView
               ref={scrollRef}
               contentContainerStyle={styles.terminalContent}
+              keyboardDismissMode={
+                Platform.OS === 'ios' && !session.mouseTracking ? 'interactive' : 'none'
+              }
               keyboardShouldPersistTaps="always"
-              onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
+              onContentSizeChange={() => {
+                if (session.mouseTracking) {
+                  scrollRef.current?.scrollTo({ y: 0, animated: false });
+                } else {
+                  scrollRef.current?.scrollToEnd({ animated: false });
+                }
+              }}
               onScrollBeginDrag={() => {
                 terminalTouchRef.current.moved = true;
               }}
               onScrollEndDrag={finishTerminalTouch}
+              scrollEnabled={!session.mouseTracking}
+              showsVerticalScrollIndicator={!session.mouseTracking}
             >
               {session.lines.map((line, lineIndex) => (
                 <View
@@ -510,6 +536,13 @@ export default function TerminalScreen() {
               keyboardShouldPersistTaps="always"
               showsHorizontalScrollIndicator={false}
             >
+              {Platform.OS === 'ios' ? (
+                <UtilityKey
+                  accessibilityLabel="Dismiss keyboard"
+                  label="KB↓"
+                  onPress={dismissTerminalKeyboard}
+                />
+              ) : null}
               <UtilityKey
                 active={modifiers.ctrl}
                 label="CTRL"
@@ -577,17 +610,20 @@ export default function TerminalScreen() {
 
 function UtilityKey({
   active = false,
+  accessibilityLabel,
   label,
   onPress,
   wide = false,
 }: {
   active?: boolean;
+  accessibilityLabel?: string;
   label: string;
   onPress: () => void;
   wide?: boolean;
 }) {
   return (
     <Pressable
+      accessibilityLabel={accessibilityLabel ?? label}
       accessibilityRole="button"
       accessibilityState={{ selected: active }}
       onPress={onPress}

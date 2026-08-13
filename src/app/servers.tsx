@@ -6,6 +6,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -31,6 +32,8 @@ import type { AuthenticatedProfile, TeleportServer } from '@/types/teleport';
 
 export default function ServersScreen() {
   const router = useRouter();
+  const { width } = useWindowDimensions();
+  const compact = width <= 390;
   const [profile, setProfile] = useState<AuthenticatedProfile | null>(null);
   const [servers, setServers] = useState<TeleportServer[]>([]);
   const [query, setQuery] = useState('');
@@ -122,7 +125,7 @@ export default function ServersScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView contentContainerStyle={[styles.content, compact && styles.contentCompact]}>
         <View style={styles.topline}>
           <View style={styles.identity}>
             <View style={styles.liveDot} />
@@ -136,7 +139,9 @@ export default function ServersScreen() {
           </Pressable>
         </View>
 
-        <Text style={styles.title}>Choose the node for login</Text>
+        <Text style={[styles.title, compact && styles.titleCompact]}>
+          Choose the node for login
+        </Text>
 
         <Field
           accessibilityLabel="Filter servers"
@@ -149,11 +154,12 @@ export default function ServersScreen() {
         {loading ? (
           <ActivityIndicator color={palette.copper} style={styles.loader} />
         ) : (
-          <View style={styles.serverList}>
+          <View style={[styles.serverList, compact && styles.serverListCompact]}>
             <Text style={styles.count}>{filtered.length} nodes available</Text>
             {filtered.map(server => (
               <ServerCard
                 activeLogin={activeTarget?.serverId === server.id ? activeTarget.login : undefined}
+                compact={compact}
                 key={server.id}
                 server={server}
                 onOpen={openServer}
@@ -171,15 +177,21 @@ export default function ServersScreen() {
 
 function ServerCard({
   activeLogin,
+  compact,
   server,
   onOpen,
 }: {
   activeLogin?: string;
+  compact: boolean;
   server: TeleportServer;
   onOpen: (server: TeleportServer, login: string) => void;
 }) {
   return (
-    <Panel style={[styles.serverCard, activeLogin && styles.serverCardActive]}>
+    <Panel style={[
+      styles.serverCard,
+      compact && styles.serverCardCompact,
+      activeLogin && styles.serverCardActive,
+    ]}>
       <View style={styles.serverHeader}>
         <View style={styles.hostBlock}>
           <View
@@ -188,20 +200,22 @@ function ServerCard({
               server.status !== 'online' && styles.statusUnknown,
             ]}
           />
-          <View>
-            <Text style={styles.hostname}>{server.hostname}</Text>
-            <Text style={styles.address}>{server.address}</Text>
+          <View style={styles.hostDetails}>
+            <Text numberOfLines={2} style={styles.hostname}>{server.hostname}</Text>
+            <View style={styles.hostMeta}>
+              <Text numberOfLines={1} style={styles.address}>{server.address}</Text>
+              {activeLogin ? (
+                <View style={styles.activeBadge}>
+                  <View style={styles.activeBadgeDot} />
+                  <Text numberOfLines={1} style={styles.activeBadgeText}>
+                    {activeLogin} session active
+                  </Text>
+                </View>
+              ) : null}
+            </View>
           </View>
         </View>
-        <View style={styles.serverAction}>
-          {activeLogin ? (
-            <View style={styles.activeBadge}>
-              <View style={styles.activeBadgeDot} />
-              <Text style={styles.activeBadgeText}>Session active</Text>
-            </View>
-          ) : null}
-          <Text style={styles.arrow}>↗</Text>
-        </View>
+        <Text style={styles.arrow}>↗</Text>
       </View>
 
       <View style={styles.labels}>
@@ -228,7 +242,7 @@ function ServerCard({
               ]}
             >
               <Text style={[styles.loginText, activeLogin === login && styles.loginTextActive]}>
-                {login}{activeLogin === login ? ' · active' : ''}
+                {login}
               </Text>
             </Pressable>
           ))}
@@ -259,6 +273,7 @@ function isActiveTerminalState(state: TerminalConnectionState) {
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: palette.ink },
   content: { padding: space.lg, paddingBottom: space.xxl, gap: space.lg },
+  contentCompact: { padding: space.md, paddingBottom: space.xl, gap: space.md },
   topline: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   identity: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flex: 1 },
   liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: palette.signal },
@@ -266,22 +281,26 @@ const styles = StyleSheet.create({
   user: { color: palette.quiet, fontFamily: type.mono, fontSize: 9, marginTop: 2 },
   signOut: { color: palette.copper, fontFamily: type.monoMedium, fontSize: 11 },
   title: { color: palette.porcelain, fontFamily: type.display, fontSize: 34, lineHeight: 38, letterSpacing: -0.6 },
+  titleCompact: { fontSize: 30, lineHeight: 34 },
   loader: { marginVertical: space.xl },
   serverList: { gap: space.md },
+  serverListCompact: { gap: 12 },
   count: { color: palette.quiet, fontFamily: type.mono, fontSize: 10, letterSpacing: 0.7, textTransform: 'uppercase' },
   serverCard: { gap: space.md },
+  serverCardCompact: { gap: 14, padding: 14 },
   serverCardActive: { borderColor: palette.signal },
-  serverHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  hostBlock: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
-  statusDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: palette.signal },
+  serverHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: space.sm },
+  hostBlock: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'flex-start', gap: space.sm },
+  hostDetails: { flex: 1, minWidth: 0 },
+  hostMeta: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: space.xs, marginTop: 3 },
+  statusDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: palette.signal, marginTop: 6 },
   statusUnknown: { backgroundColor: palette.warning },
   hostname: { color: palette.porcelain, fontFamily: type.monoStrong, fontSize: 15 },
-  address: { color: palette.quiet, fontFamily: type.mono, fontSize: 10, marginTop: 3 },
-  serverAction: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
-  activeBadge: { flexDirection: 'row', alignItems: 'center', gap: space.xs, borderRadius: radius.pill, backgroundColor: palette.raised, paddingHorizontal: space.sm, paddingVertical: 5 },
+  address: { flexShrink: 1, color: palette.quiet, fontFamily: type.mono, fontSize: 10 },
+  activeBadge: { maxWidth: '100%', flexShrink: 1, flexDirection: 'row', alignItems: 'center', gap: space.xs, borderRadius: radius.pill, backgroundColor: palette.raised, paddingHorizontal: space.sm, paddingVertical: 5 },
   activeBadgeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: palette.signal },
-  activeBadgeText: { color: palette.signal, fontFamily: type.monoMedium, fontSize: 8, textTransform: 'uppercase', letterSpacing: 0.5 },
-  arrow: { color: palette.copper, fontFamily: type.monoStrong, fontSize: 20 },
+  activeBadgeText: { flexShrink: 1, color: palette.signal, fontFamily: type.monoMedium, fontSize: 8, textTransform: 'uppercase', letterSpacing: 0.5 },
+  arrow: { color: palette.copper, fontFamily: type.monoStrong, fontSize: 20, lineHeight: 22 },
   labels: { flexDirection: 'row', flexWrap: 'wrap', gap: space.xs },
   label: { color: palette.mist, backgroundColor: palette.raised, borderRadius: radius.pill, paddingHorizontal: space.sm, paddingVertical: 5, fontFamily: type.mono, fontSize: 9 },
   loginRow: { borderTopColor: palette.rule, borderTopWidth: 1, paddingTop: space.md, gap: space.sm },
