@@ -5,6 +5,7 @@ import { palette } from '@/constants/tokens';
 export type TerminalCellStyle = {
   backgroundColor?: string;
   color: string;
+  cursor: boolean;
   dim: boolean;
   italic: boolean;
   bold: boolean;
@@ -12,6 +13,8 @@ export type TerminalCellStyle = {
 };
 
 export type TerminalRun = TerminalCellStyle & {
+  cells: number;
+  column: number;
   text: string;
 };
 
@@ -58,6 +61,7 @@ export function snapshotTerminal(terminal: Terminal): TerminalLine[] {
       const style: TerminalCellStyle = {
         color: isCursor ? palette.ink : cell.isInvisible() ? hiddenColor : color,
         backgroundColor,
+        cursor: isCursor,
         dim: Boolean(cell.isDim()),
         italic: Boolean(cell.isItalic()),
         bold: Boolean(cell.isBold()),
@@ -68,8 +72,9 @@ export function snapshotTerminal(terminal: Terminal): TerminalLine[] {
 
       if (previous && sameStyle(previous, style)) {
         previous.text += text;
+        previous.cells += cell.getWidth();
       } else {
-        runs.push({ ...style, text });
+        runs.push({ ...style, cells: cell.getWidth(), column: x, text });
       }
     }
 
@@ -114,6 +119,7 @@ function decorationFor(underline: boolean, strikethrough: boolean): TerminalCell
 function sameStyle(left: TerminalCellStyle, right: TerminalCellStyle) {
   return left.color === right.color
     && left.backgroundColor === right.backgroundColor
+    && left.cursor === right.cursor
     && left.dim === right.dim
     && left.italic === right.italic
     && left.bold === right.bold
@@ -122,8 +128,11 @@ function sameStyle(left: TerminalCellStyle, right: TerminalCellStyle) {
 
 function defaultRun(text: string): TerminalRun {
   return {
+    cells: 1,
+    column: 0,
     text,
     color: palette.porcelain,
+    cursor: false,
     dim: false,
     italic: false,
     bold: false,

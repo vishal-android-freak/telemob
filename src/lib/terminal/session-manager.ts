@@ -3,6 +3,7 @@ import { AppState, type AppStateStatus } from 'react-native';
 
 import { getTeleportClient, type TeleportClient } from '@/lib/teleport/client';
 import { createTerminal } from '@/lib/terminal/runtime';
+import { terminalMouseScrollSequence, terminalMouseTapSequence } from '@/lib/terminal/keys';
 import { snapshotTerminal, type TerminalLine } from '@/lib/terminal/snapshot';
 import type {
   SessionTarget,
@@ -25,6 +26,7 @@ export type TerminalSessionSnapshot = {
   state: TerminalConnectionState;
   error: string;
   lines: TerminalLine[];
+  alternateScreen: boolean;
   generation: number;
 };
 
@@ -72,6 +74,7 @@ class TerminalSessionManager {
     state: this.state,
     error: this.error,
     lines: this.lines,
+    alternateScreen: this.terminal.buffer.active.type === 'alternate',
     generation: this.generation,
   });
 
@@ -125,6 +128,20 @@ class TerminalSessionManager {
       ? `\u001b[200~${data}\u001b[201~`
       : data;
     return this.send(payload);
+  }
+
+  sendMouseTap(column: number, row: number) {
+    if (this.terminal.modes.mouseTrackingMode === 'none') {
+      return Promise.resolve(false);
+    }
+    return this.send(terminalMouseTapSequence(column, row)).then(() => true);
+  }
+
+  sendMouseScroll(column: number, row: number, direction: 'up' | 'down', steps: number) {
+    if (this.terminal.modes.mouseTrackingMode === 'none') {
+      return Promise.resolve(false);
+    }
+    return this.send(terminalMouseScrollSequence(column, row, direction, steps)).then(() => true);
   }
 
   resize(columns: number, rows: number) {

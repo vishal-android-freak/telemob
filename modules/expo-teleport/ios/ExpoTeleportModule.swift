@@ -46,11 +46,15 @@ public final class ExpoTeleportModule: Module {
     }.runOnQueue(.main)
 
     AsyncFunction("exportSessionAsync") { () throws -> String in
-      try core.exportSessionJSON()
+      try callGo { error in
+        core.exportSessionJSON(error)
+      }
     }
 
     AsyncFunction("restoreSessionAsync") { (snapshotJSON: String) throws -> String in
-      try core.restoreSessionJSON(snapshotJSON)
+      try callGo { error in
+        core.restoreSessionJSON(snapshotJSON, error: error)
+      }
     }
 
     AsyncFunction("logoutAsync") {
@@ -61,7 +65,9 @@ public final class ExpoTeleportModule: Module {
     }
 
     AsyncFunction("beginLoginAsync") { (requestJSON: String) throws -> String in
-      let challengeJSON = try core.beginLoginJSON(requestJSON)
+      let challengeJSON = try callGo { error in
+        core.beginLoginJSON(requestJSON, error: error)
+      }
       if
         let data = challengeJSON.data(using: .utf8),
         let challenge = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -76,7 +82,9 @@ public final class ExpoTeleportModule: Module {
     }
 
     AsyncFunction("finishTotpAsync") { (challengeID: String, code: String) throws -> String in
-      try core.finishTOTP(challengeID, code: code)
+      try callGo { error in
+        core.finishTOTP(challengeID, code: code, error: error)
+      }
     }
 
     AsyncFunction("finishPasskeyAsync") { [weak self] (challengeID: String, credentialJSON: String, promise: Promise) in
@@ -86,7 +94,9 @@ public final class ExpoTeleportModule: Module {
       }
       if !credentialJSON.isEmpty {
         do {
-          promise.resolve(try core.finishPasskey(challengeID, credentialJSON: credentialJSON))
+          promise.resolve(try callGo { error in
+            core.finishPasskey(challengeID, credentialJSON: credentialJSON, error: error)
+          })
         } catch {
           promise.reject(error)
         }
@@ -117,7 +127,9 @@ public final class ExpoTeleportModule: Module {
             }
           }
           do {
-            promise.resolve(try self.core.finishPasskey(challengeID, credentialJSON: ""))
+            promise.resolve(try callGo { error in
+              self.core.finishPasskey(challengeID, credentialJSON: "", error: error)
+            })
           } catch {
             promise.reject(error)
           }
@@ -126,11 +138,15 @@ public final class ExpoTeleportModule: Module {
     }.runOnQueue(.main)
 
     AsyncFunction("listServersAsync") { () throws -> String in
-      try core.listServersJSON()
+      try callGo { error in
+        core.listServersJSON(error)
+      }
     }
 
     AsyncFunction("openSessionAsync") { (targetJSON: String) throws -> String in
-      let sessionJSON = try core.openSessionJSON(targetJSON)
+      let sessionJSON = try callGo { error in
+        core.openSessionJSON(targetJSON, error: error)
+      }
       if
         let data = sessionJSON.data(using: .utf8),
         let session = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -154,7 +170,9 @@ public final class ExpoTeleportModule: Module {
     }
 
     AsyncFunction("sessionOutputAsync") { (sessionID: String, afterSequence: Double) throws -> String in
-      try core.sessionOutputJSON(sessionID, afterSequence: Int64(afterSequence))
+      try callGo { error in
+        core.sessionOutputJSON(sessionID, afterSequence: Int64(afterSequence), error: error)
+      }
     }
 
     AsyncFunction("closeSessionAsync") { (sessionID: String) in
@@ -162,6 +180,18 @@ public final class ExpoTeleportModule: Module {
       BackgroundTerminalLease.shared.stop(sessionID: sessionID)
     }
   }
+}
+
+private func callGo<Result>(_ operation: (NSErrorPointer) -> Result) throws -> Result {
+  // gomobile's object-returning Objective-C methods keep an explicit NSError
+  // pointer in Swift. Its BOOL-returning methods are imported as `throws`
+  // instead and must be called directly without this helper.
+  var operationError: NSError?
+  let result = operation(&operationError)
+  if let operationError {
+    throw operationError
+  }
+  return result
 }
 
 private final class BackgroundTerminalLease {
@@ -220,7 +250,7 @@ private final class BrowserMFALease {
   }
 }
 
-private final class TerminalEventSink: NSObject, TeleportmobileEventSink {
+private final class TerminalEventSink: NSObject, TeleportmobileEventSinkProtocol {
   private let handler: (String) -> Void
 
   init(handler: @escaping (String) -> Void) {

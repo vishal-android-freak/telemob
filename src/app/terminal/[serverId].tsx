@@ -1,5 +1,5 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   type GestureResponderEvent,
   Keyboard,
@@ -24,13 +24,15 @@ import {
 } from '@/lib/terminal/keys';
 import { getTerminalSessionManager } from '@/lib/terminal/session-manager';
 
-const MAX_TERMINAL_FONT_SIZE = 13;
-const MIN_TERMINAL_COLUMNS = 84;
+const SHELL_TERMINAL_FONT_SIZE = 7.5;
+const FULL_SCREEN_TERMINAL_FONT_SIZE = 11;
 const TERMINAL_CELL_WIDTH_RATIO = 0.6;
 const TERMINAL_LINE_HEIGHT_RATIO = 20 / 13;
 const TERMINAL_PADDING = 12;
-const INITIAL_SIZE = { columns: MIN_TERMINAL_COLUMNS, rows: 40 };
-const INITIAL_FONT_METRICS = { fontSize: 7.5, lineHeight: 7.5 * TERMINAL_LINE_HEIGHT_RATIO };
+const INITIAL_FONT_METRICS = {
+  fontSize: SHELL_TERMINAL_FONT_SIZE,
+  lineHeight: SHELL_TERMINAL_FONT_SIZE * TERMINAL_LINE_HEIGHT_RATIO,
+};
 const TERMINAL_TAP_SLOP = 8;
 
 export default function TerminalScreen() {
@@ -42,35 +44,48 @@ export default function TerminalScreen() {
   }>();
   const [manager] = useState(getTerminalSessionManager);
   const [session, setSession] = useState(manager.getSnapshot);
-  const [dimensions, setDimensions] = useState(INITIAL_SIZE);
+  const [dimensions, setDimensions] = useState({ columns: 0, rows: 0 });
+  const [viewportReady, setViewportReady] = useState(false);
   const [fontMetrics, setFontMetrics] = useState(INITIAL_FONT_METRICS);
   const [command, setCommand] = useState('');
   const [lineMode, setLineMode] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [modifiers, setModifiers] = useState<TerminalModifiers>({ ctrl: false, alt: false });
-  const dimensionsRef = useRef(INITIAL_SIZE);
+  const modifiersRef = useRef<TerminalModifiers>({ ctrl: false, alt: false });
+  const dimensionsRef = useRef<{ columns: number; rows: number } | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const directInputRef = useRef<TextInput>(null);
   const directInputValueRef = useRef('');
   const directInputFocusedRef = useRef(false);
   const keyboardVisibleRef = useRef(Keyboard.isVisible());
   const lineInputRef = useRef<TextInput>(null);
-  const terminalTouchRef = useRef({ pageX: 0, pageY: 0, moved: false });
+  const terminalViewportRef = useRef<View>(null);
+  const viewportSizeRef = useRef<{ width: number; height: number } | null>(null);
+  const terminalTouchRef = useRef({
+    pageX: 0,
+    pageY: 0,
+    lastPageX: 0,
+    lastPageY: 0,
+    handled: false,
+    moved: false,
+  });
   const connected = session.state === 'connected';
 
   useEffect(() => {
     const unsubscribe = manager.subscribe(setSession);
+    const size = dimensionsRef.current;
+    if (!viewportReady || !size) return unsubscribe;
     manager.attach({
       serverId: params.serverId,
       hostname: params.hostname,
       login: params.login,
-      ...dimensionsRef.current,
-    }, dimensionsRef.current);
+      ...size,
+    }, size);
     return () => {
       unsubscribe();
       manager.detach();
     };
-  }, [manager, params.hostname, params.login, params.serverId]);
+  }, [manager, params.hostname, params.login, params.serverId, viewportReady]);
 
   useEffect(() => {
     const shown = Keyboard.addListener('keyboardDidShow', () => {
@@ -90,18 +105,16 @@ export default function TerminalScreen() {
     };
   }, []);
 
-  function resizeTerminal(event: LayoutChangeEvent) {
-    const { width, height } = event.nativeEvent.layout;
+  const applyTerminalSize = useCallback((width: number, height: number, narrowTUI: boolean) => {
     const availableWidth = Math.max(1, width - TERMINAL_PADDING * 2);
     const availableHeight = Math.max(1, height - TERMINAL_PADDING * 2);
-    const fontSize = Math.min(
-      MAX_TERMINAL_FONT_SIZE,
-      availableWidth / (MIN_TERMINAL_COLUMNS * TERMINAL_CELL_WIDTH_RATIO)
-    );
+    const fontSize = narrowTUI
+      ? FULL_SCREEN_TERMINAL_FONT_SIZE
+      : SHELL_TERMINAL_FONT_SIZE;
     const cellWidth = fontSize * TERMINAL_CELL_WIDTH_RATIO;
     const lineHeight = fontSize * TERMINAL_LINE_HEIGHT_RATIO;
     const next = {
-      columns: Math.max(MIN_TERMINAL_COLUMNS, Math.floor(availableWidth / cellWidth)),
+      columns: Math.max(1, Math.floor(availableWidth / cellWidth)),
       rows: Math.max(8, Math.floor(availableHeight / lineHeight)),
     };
     setFontMetrics(current =>
@@ -111,12 +124,25 @@ export default function TerminalScreen() {
         : { fontSize, lineHeight }
     );
     const current = dimensionsRef.current;
-    if (next.columns === current.columns && next.rows === current.rows) return;
+    if (current && next.columns === current.columns && next.rows === current.rows) return;
 
     dimensionsRef.current = next;
     setDimensions(next);
+    if (!current) setViewportReady(true);
     manager.resize(next.columns, next.rows);
+  }, [manager]);
+
+  function resizeTerminal(event: LayoutChangeEvent) {
+    const { width, height } = event.nativeEvent.layout;
+    viewportSizeRef.current = { width, height };
+    applyTerminalSize(width, height, session.alternateScreen);
   }
+
+  useEffect(() => {
+    const viewport = viewportSizeRef.current;
+    if (!viewport) return;
+    applyTerminalSize(viewport.width, viewport.height, session.alternateScreen);
+  }, [applyTerminalSize, session.alternateScreen]);
 
   async function submitCommand() {
     if (!connected || !command) return;
@@ -131,8 +157,9 @@ export default function TerminalScreen() {
   }
 
   function sendTerminalKey(key: string) {
-    const sequence = terminalKeySequence(key, modifiers);
+    const sequence = terminalKeySequence(key, modifiersRef.current);
     if (sequence) sendRaw(sequence);
+    releaseModifiers();
   }
 
   function sendTypedText(nextText: string) {
@@ -143,9 +170,25 @@ export default function TerminalScreen() {
     const insertedText = nextText.startsWith(previousText)
       ? nextText.slice(previousText.length)
       : nextText;
-    const sequence = terminalTextSequence(insertedText, modifiers);
+    const sequence = terminalTextSequence(insertedText, modifiersRef.current);
     if (sequence) sendRaw(sequence);
+    releaseModifiers();
     if (nextText.length >= 128) resetDirectInput();
+  }
+
+  function releaseModifiers() {
+    if (modifiersRef.current.ctrl || modifiersRef.current.alt) {
+      modifiersRef.current = { ctrl: false, alt: false };
+      setModifiers(modifiersRef.current);
+    }
+  }
+
+  function toggleModifier(modifier: keyof TerminalModifiers) {
+    modifiersRef.current = {
+      ...modifiersRef.current,
+      [modifier]: !modifiersRef.current[modifier],
+    };
+    setModifiers(modifiersRef.current);
   }
 
   function resetDirectInput() {
@@ -155,12 +198,21 @@ export default function TerminalScreen() {
 
   function startTerminalTouch(event: GestureResponderEvent) {
     const { pageX, pageY } = event.nativeEvent;
-    terminalTouchRef.current = { pageX, pageY, moved: false };
+    terminalTouchRef.current = {
+      pageX,
+      pageY,
+      lastPageX: pageX,
+      lastPageY: pageY,
+      handled: false,
+      moved: false,
+    };
   }
 
   function moveTerminalTouch(event: GestureResponderEvent) {
     const touch = terminalTouchRef.current;
     const { pageX, pageY } = event.nativeEvent;
+    touch.lastPageX = pageX;
+    touch.lastPageY = pageY;
     if (
       Math.abs(pageX - touch.pageX) > TERMINAL_TAP_SLOP
       || Math.abs(pageY - touch.pageY) > TERMINAL_TAP_SLOP
@@ -170,16 +222,54 @@ export default function TerminalScreen() {
   }
 
   function finishTerminalTouch() {
-    if (
-      !terminalTouchRef.current.moved
-      && connected
-      && !lineMode
-      && !keyboardVisibleRef.current
-      && !directInputFocusedRef.current
-    ) {
-      directInputRef.current?.focus();
+    const touch = terminalTouchRef.current;
+    if (touch.handled) return;
+    touch.handled = true;
+    if (touch.moved && connected) {
+      sendTerminalScroll(touch);
+    } else if (connected) {
+      sendTerminalTap(touch.pageX, touch.pageY);
+      if (
+        !lineMode
+        && !keyboardVisibleRef.current
+        && !directInputFocusedRef.current
+      ) {
+        directInputRef.current?.focus();
+      }
     }
-    terminalTouchRef.current.moved = false;
+    touch.moved = false;
+  }
+
+  function sendTerminalScroll(touch: typeof terminalTouchRef.current) {
+    terminalViewportRef.current?.measureInWindow((viewportX, viewportY) => {
+      const cellWidth = fontMetrics.fontSize * TERMINAL_CELL_WIDTH_RATIO;
+      const x = touch.lastPageX - viewportX - TERMINAL_PADDING;
+      const y = touch.lastPageY - viewportY - TERMINAL_PADDING;
+      if (x < 0 || y < 0 || cellWidth <= 0 || fontMetrics.lineHeight <= 0) return;
+
+      const column = Math.floor(x / cellWidth) + 1;
+      const row = Math.floor(y / fontMetrics.lineHeight) + 1;
+      if (column > dimensions.columns || row > dimensions.rows) return;
+
+      const deltaY = touch.lastPageY - touch.pageY;
+      const steps = Math.min(8, Math.max(1, Math.round(Math.abs(deltaY) / fontMetrics.lineHeight)));
+      const direction = deltaY > 0 ? 'up' : 'down';
+      void manager.sendMouseScroll(column, row, direction, steps).catch(() => undefined);
+    });
+  }
+
+  function sendTerminalTap(pageX: number, pageY: number) {
+    terminalViewportRef.current?.measureInWindow((viewportX, viewportY) => {
+      const x = pageX - viewportX - TERMINAL_PADDING;
+      const y = pageY - viewportY - TERMINAL_PADDING;
+      const cellWidth = fontMetrics.fontSize * TERMINAL_CELL_WIDTH_RATIO;
+      if (x < 0 || y < 0 || cellWidth <= 0 || fontMetrics.lineHeight <= 0) return;
+
+      const column = Math.floor(x / cellWidth) + 1;
+      const row = Math.floor(y / fontMetrics.lineHeight) + 1;
+      if (column > dimensions.columns || row > dimensions.rows) return;
+      void manager.sendMouseTap(column, row).catch(() => undefined);
+    });
   }
 
   async function disconnectTerminal() {
@@ -240,7 +330,9 @@ export default function TerminalScreen() {
             </View>
             <View style={styles.headerActions}>
               <View style={styles.sessionState}>
-                <Text style={styles.dimensions}>{dimensions.columns}×{dimensions.rows}</Text>
+                <Text style={styles.dimensions}>
+                  {viewportReady ? `${dimensions.columns}×${dimensions.rows}` : 'measuring'}
+                </Text>
                 <View style={[styles.liveDot, !connected && styles.liveDotWaiting]} />
               </View>
               <Pressable
@@ -263,6 +355,7 @@ export default function TerminalScreen() {
           </View>
 
           <View
+            ref={terminalViewportRef}
             onLayout={resizeTerminal}
             onTouchCancel={() => {
               terminalTouchRef.current.moved = true;
@@ -280,34 +373,89 @@ export default function TerminalScreen() {
               onScrollBeginDrag={() => {
                 terminalTouchRef.current.moved = true;
               }}
+              onScrollEndDrag={finishTerminalTouch}
             >
               {session.lines.map((line, lineIndex) => (
-                <Text
-                  allowFontScaling={false}
+                <View
                   key={lineIndex}
-                  selectable
                   style={[
                     styles.outputLine,
-                    { fontSize: fontMetrics.fontSize, lineHeight: fontMetrics.lineHeight },
+                    {
+                      height: fontMetrics.lineHeight,
+                      width: dimensions.columns
+                        * fontMetrics.fontSize
+                        * TERMINAL_CELL_WIDTH_RATIO,
+                    },
                   ]}
                 >
-                  {line.runs.map((run, runIndex) => (
+                  {line.runs.map((run, runIndex) => run.backgroundColor && !run.cursor ? (
+                    <View
+                      key={`background-${runIndex}`}
+                      style={{
+                        position: 'absolute',
+                        left: run.column * fontMetrics.fontSize * TERMINAL_CELL_WIDTH_RATIO,
+                        width: run.cells * fontMetrics.fontSize * TERMINAL_CELL_WIDTH_RATIO,
+                        height: fontMetrics.lineHeight,
+                        backgroundColor: run.backgroundColor,
+                      }}
+                    />
+                  ) : null)}
+                  {line.runs.map((run, runIndex) => !run.cursor ? (
                     <Text
                       allowFontScaling={false}
-                      key={runIndex}
+                      key={`text-${runIndex}`}
+                      numberOfLines={1}
                       style={{
-                        backgroundColor: run.backgroundColor,
+                        position: 'absolute',
+                        left: run.column * fontMetrics.fontSize * TERMINAL_CELL_WIDTH_RATIO,
+                        height: fontMetrics.lineHeight,
                         color: run.color,
                         fontFamily: run.bold ? type.monoStrong : type.mono,
+                        fontSize: fontMetrics.fontSize,
                         fontStyle: run.italic ? 'italic' : 'normal',
+                        includeFontPadding: false,
+                        lineHeight: fontMetrics.lineHeight,
                         opacity: run.dim ? 0.65 : 1,
                         textDecorationLine: run.decoration,
                       }}
+                      textBreakStrategy="simple"
                     >
                       {run.text}
                     </Text>
-                  ))}
-                </Text>
+                  ) : null)}
+                  {line.runs.map((run, runIndex) => run.cursor ? (
+                    <View
+                      key={`cursor-${runIndex}`}
+                      style={{
+                        position: 'absolute',
+                        left: run.column * fontMetrics.fontSize * TERMINAL_CELL_WIDTH_RATIO,
+                        width: run.cells * fontMetrics.fontSize * TERMINAL_CELL_WIDTH_RATIO,
+                        height: fontMetrics.lineHeight,
+                        backgroundColor: run.backgroundColor,
+                      }}
+                    >
+                      <Text
+                        allowFontScaling={false}
+                        numberOfLines={1}
+                        style={{
+                          position: 'absolute',
+                          height: fontMetrics.lineHeight,
+                          color: run.color,
+                          fontFamily: run.bold ? type.monoStrong : type.mono,
+                          fontSize: fontMetrics.fontSize,
+                          fontStyle: run.italic ? 'italic' : 'normal',
+                          includeFontPadding: false,
+                          lineHeight: fontMetrics.lineHeight,
+                          opacity: run.dim ? 0.65 : 1,
+                          textDecorationLine: run.decoration,
+                        }}
+                        textBreakStrategy="simple"
+                      >
+                        {run.text}
+                      </Text>
+                    </View>
+                  ) : null)}
+                </View>
               ))}
             </ScrollView>
 
@@ -355,13 +503,13 @@ export default function TerminalScreen() {
               <UtilityKey
                 active={modifiers.ctrl}
                 label="CTRL"
-                onPress={() => setModifiers(value => ({ ...value, ctrl: !value.ctrl }))}
+                onPress={() => toggleModifier('ctrl')}
                 wide
               />
               <UtilityKey
                 active={modifiers.alt}
                 label="ALT"
-                onPress={() => setModifiers(value => ({ ...value, alt: !value.alt }))}
+                onPress={() => toggleModifier('alt')}
               />
               <UtilityKey label="PASTE" onPress={pasteClipboard} wide />
               <UtilityKey active={lineMode} label="LINE" onPress={toggleLineMode} wide />
@@ -480,7 +628,10 @@ const styles = StyleSheet.create({
   disconnectText: { color: palette.danger, fontFamily: type.monoMedium, fontSize: 9 },
   terminalViewport: { flex: 1, backgroundColor: palette.terminal },
   terminalContent: { padding: TERMINAL_PADDING, flexGrow: 1 },
-  outputLine: { color: palette.porcelain, fontFamily: type.mono },
+  outputLine: {
+    flexShrink: 0,
+    overflow: 'hidden',
+  },
   directInput: { position: 'absolute', width: 1, height: 1, left: 0, bottom: 0, opacity: 0 },
   errorBanner: {
     position: 'absolute',

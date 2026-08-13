@@ -128,5 +128,22 @@ certificate trusted by that browser.
 
 See [docs/architecture.md](docs/architecture.md) for ownership boundaries,
 authentication design, transport details, and current limitations.
+
+## EAS iOS builds
+
+The project is linked to EAS project
+`c72bfab5-a90d-4b46-8c2e-d86c2c90810c`. EAS generates the ignored Go
+XCFramework on its macOS worker before Expo prebuild and CocoaPods installation.
+
+For an installable iPhone build, register the device before starting the build:
+
+```bash
+eas device:create
+eas build --platform ios --profile preview
+```
+
+The `preview` profile creates a standalone ad hoc IPA. The `development`
+profile creates an Expo development client, and `production` is reserved for
+TestFlight or App Store distribution.
 See [docs/terminal-keyboard.md](docs/terminal-keyboard.md) for the open-source
 terminal keyboard research and the resulting v1 key set.

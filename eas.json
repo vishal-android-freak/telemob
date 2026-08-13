@@ -1,0 +1,30 @@
+{
+  "cli": {
+    "version": ">= 21.8.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": {
+        "image": "sdk-57"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "ios": {
+        "image": "sdk-57"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "ios": {
+        "image": "sdk-57"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

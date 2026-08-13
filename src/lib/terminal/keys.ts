@@ -93,3 +93,21 @@ export function terminalTextSequence(text: string, modifiers: TerminalModifiers)
   }
   return modifiers.alt ? `\u001b${sequence}` : sequence;
 }
+
+export function terminalMouseTapSequence(column: number, row: number) {
+  const x = Math.max(1, Math.floor(column));
+  const y = Math.max(1, Math.floor(row));
+  return `\u001b[<0;${x};${y}M\u001b[<0;${x};${y}m`;
+}
+
+export function terminalMouseScrollSequence(
+  column: number,
+  row: number,
+  direction: 'up' | 'down',
+  steps: number
+) {
+  const x = Math.max(1, Math.floor(column));
+  const y = Math.max(1, Math.floor(row));
+  const button = direction === 'up' ? 64 : 65;
+  return `\u001b[<${button};${x};${y}M`.repeat(Math.max(1, Math.floor(steps)));
+}

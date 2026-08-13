@@ -46,6 +46,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
+    "eas-build-pre-install": "bash scripts/eas-build-pre-install.sh",
     "lint": "expo lint",
     "typecheck": "tsc --noEmit",
     "test:go": "cd go/teleportmobile && go test ./...",

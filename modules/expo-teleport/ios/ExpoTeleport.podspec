@@ -6,8 +6,8 @@ Pod::Spec.new do |s|
   s.author         = 'Telemob'
   s.homepage       = 'https://goteleport.com/'
   s.platforms      = {
-    :ios => '16.4',
-    :tvos => '16.4'
+    :ios => '15.1',
+    :tvos => '15.1'
   }
   s.source         = { git: '' }
   s.static_framework = true
@@ -20,5 +20,8 @@ Pod::Spec.new do |s|
     'DEFINES_MODULE' => 'YES',
   }
 
-  s.source_files = "**/*.{h,m,mm,swift,hpp,cpp}"
+  # The gomobile headers belong exclusively to the vendored XCFramework.
+  # Recursively globbing this directory makes CocoaPods add private binding
+  # headers such as ref.h to ExpoTeleport's generated umbrella header.
+  s.source_files = 'ExpoTeleportModule.swift'
 end
