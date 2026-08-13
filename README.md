@@ -1,81 +1,143 @@
-# Telemob
+<p align="center">
+  <img src="assets/images/icon.png" alt="Telemob app icon" width="144" height="144">
+</p>
 
-Telemob is a mobile Teleport client prototype for iOS and Android. It uses
-Expo/React Native for one shared product UI and a Go core, exported with gomobile,
-for Teleport authentication, resource discovery, and terminal sessions.
+<h1 align="center">Telemob</h1>
 
-The current vertical slice includes:
+<p align="center">
+  An open-source mobile SSH client for Teleport, built with Expo, React Native, and Go.
+</p>
 
-- username/password login with passkey and TOTP challenge states;
-- secure on-device profile metadata storage;
-- encrypted Teleport web-session restoration until the cluster session expires;
-- node discovery, filtering, and SSH-login selection;
-- a full-screen mobile terminal with direct typing, paste, sticky Ctrl/Alt,
-  navigation/editing keys, F1–F12, and optional whole-line input;
-- Teleport local-user login with TOTP and Browser MFA passkeys;
-- RBAC-filtered node discovery over the Teleport web API;
-- an audited PTY session over Teleport's authenticated WebSocket transport;
-- Swift and Kotlin bridges to the same Go implementation;
-- an explicit, disabled-by-default insecure TLS option for self-signed test clusters;
-- native session ownership with bounded output replay and clean reconnects;
-- Android background retention through a visible foreground-service notification;
-- best-effort iOS background execution within Apple's client-app limits;
-- a deterministic development transport for Expo web and UI work.
+> [!IMPORTANT]
+> Telemob is an independent, unofficial community project. It is not sponsored,
+> endorsed, maintained by, or affiliated with Gravitational Inc. or the Teleport
+> project. Teleport is created and maintained by Gravitational; see
+> [goteleport.com](https://goteleport.com/) and
+> [gravitational/teleport](https://github.com/gravitational/teleport).
 
-Native development builds use the production Go transport by default. Expo web
-and Expo Go use the deterministic transport because they cannot load the custom
-module. Set `EXPO_PUBLIC_TELEPORT_NATIVE_CORE=0` to force the development driver
-in a native build.
+Telemob lets you authenticate to a Teleport proxy, discover the SSH nodes your
+role can access, and open an interactive terminal from Android or iOS. One Expo
+application provides the interface while a shared Go core implements the
+Teleport transport on both platforms.
 
-## Run the current slice
+Telemob is under active development. Review the [current limitations](#current-limitations)
+before relying on it for critical access.
+
+## Features
+
+- Teleport local-user login with password and TOTP.
+- Browser MFA for passkeys on supported Teleport clusters.
+- Encrypted on-device restoration of the Teleport web session; passwords are
+  never persisted.
+- RBAC-filtered node discovery, search, and SSH-login selection.
+- Interactive PTY sessions over Teleport's authenticated WebSocket transport.
+- A full-screen terminal with direct typing, paste, Ctrl/Alt modifiers,
+  navigation and editing keys, F1–F12, and optional whole-line input.
+- Terminal mouse clicks and scroll events for compatible full-screen TUI apps.
+- Dynamic PTY sizing based on the actual mobile viewport.
+- Android foreground-service retention with a visible notification and
+  Disconnect action.
+- Best-effort iOS background retention and connection verification on resume.
+- An explicit, disabled-by-default insecure TLS option for development clusters
+  using self-signed certificates.
+
+## Screens and runtime
+
+Native development builds use the Go transport. Expo web and Expo Go use a
+deterministic preview transport because they cannot load Telemob's custom native
+module. Set `EXPO_PUBLIC_TELEPORT_NATIVE_CORE=0` to force the preview transport
+inside a native development build.
+
+The active SSH session is owned below the React screen. Navigating away or
+backgrounding the app does not intentionally close it. Output is sequenced and
+retained in a bounded replay window; on resume, Telemob fills missed output,
+checks liveness, and reconnects with a fresh terminal parser when necessary.
+No tmux, screen, Mosh, agent, or other target-server software is required.
+
+## Requirements
+
+- Node.js 22 or newer and npm.
+- Go 1.25 or newer plus `gomobile` and `gobind` for native core builds.
+- Android Studio/SDK/NDK and JDK 17 for Android development.
+- macOS with Xcode for local iOS development.
+- A reachable Teleport proxy and a local Teleport user.
+
+The current Android Go binding targets `arm64-v8a`. iOS deployment targets 15.1
+or newer. This app requires an Expo development build; Expo Go is not sufficient.
+
+## Quick start
+
+Install the JavaScript dependencies and run the deterministic web preview:
 
 ```bash
-npm install
+npm ci
 npm run web
 ```
 
-Use any non-empty password. For TOTP, use any six digits. This web preview never
-contacts a Teleport cluster.
+The preview does not contact a Teleport cluster. Any non-empty password and any
+six-digit TOTP value can be used.
+
+For a native Android build:
 
 ```bash
+go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260812174124-2f419b2fb945
+go install golang.org/x/mobile/cmd/gobind@v0.0.0-20260812174124-2f419b2fb945
 npm run build:core:android
-npx expo prebuild
-npx expo run:android
-# or, on macOS:
-npm run build:core:ios
-npx expo run:ios
+npx expo prebuild --platform android
+npx expo run:android --device
 ```
 
-This app needs an Expo development build; Expo Go cannot load the custom Teleport
-native module.
+For iOS on macOS, replace the core and Expo commands with:
 
-Android builds target Pixel 10 / `arm64-v8a` only. Use Java 21 for Android
-Gradle builds; newer Java releases may not yet work with Android's JDK image
-transform.
+```bash
+npm run build:core:ios
+npx expo prebuild --platform ios
+npx expo run:ios --device
+```
 
-After a successful native login, Telemob stores the Teleport web-session
-token and session cookie with Expo SecureStore and restores them on cold launch.
-The saved session is discarded when it expires or when the user signs out. The
-Teleport password is never persisted.
+See [Development](docs/development.md) for environment details, native artifact
+paths, testing, and troubleshooting.
 
-## Terminal lifecycle
+## Authentication notes
 
-The active SSH session belongs to the native session manager, not the terminal
-screen. Navigating away or backgrounding the app does not intentionally close
-it. Native output is sequenced and retained in a bounded 1 MiB replay window,
-so returning to the terminal fills output missed while React was paused without
-duplicating bytes. A real WebSocket ping verifies liveness on resume. If the
-connection died, Telemob creates a new SSH session and a fresh terminal parser;
-old scrollback is never appended to the new shell.
+### Browser MFA passkeys
 
-Android keeps a user-started terminal alive with a visible foreground-service
-notification and Disconnect action. iOS grants ordinary apps only a limited
-background execution extension, so Telemob preserves the connection on a
-best-effort basis and verifies or reconnects it on return. Telemob does not
-require or install tmux, screen, Mosh, an agent, or any other software on the
-target server.
+Passkeys use Teleport Browser MFA so users can enter public or private proxy
+domains at runtime without Telemob owning those domains. The Go core starts an
+encrypted loopback callback, the native bridge opens Teleport's Browser MFA page
+in the system browser, and the browser returns the WebAuthn result to the app.
 
-## Validate
+Browser MFA requires Teleport 18.8 or newer with CLI browser authentication
+enabled. Private proxies work when the phone can resolve the hostname and its
+system browser trusts the proxy certificate. TOTP remains available on older
+supported clusters.
+
+### Self-signed proxy certificates
+
+The login screen includes **Trust self-signed certificate**, equivalent in
+intent to `tsh login --insecure`. It disables certificate-chain and hostname
+verification for Telemob's HTTPS and terminal WebSocket connections. It is off
+by default and should be enabled only after the proxy identity has been verified
+through another trusted channel.
+
+This setting cannot change trust inside the system browser. Browser MFA still
+requires the proxy certificate to be trusted by the phone's browser.
+
+## Current limitations
+
+- Local Teleport users only; SSO is not implemented.
+- SSH nodes only; application, database, Kubernetes, and desktop access are not
+  implemented.
+- No file transfer, agent forwarding, session joining, or per-session MFA.
+- Android release artifacts currently include only the `arm64-v8a` Go binding.
+- iOS background execution is bounded by the operating system and cannot
+  guarantee an indefinitely live socket.
+- The web build is a UI preview and cannot connect to a real cluster.
+
+The detailed design and protocol boundary are documented in
+[Architecture](docs/architecture.md).
+
+## Validation
 
 ```bash
 npm run typecheck
@@ -83,67 +145,51 @@ npm run lint
 npm run test:go
 ```
 
-## Build the shared Go core
+Pull requests and pushes to `main` run these checks in GitHub Actions.
 
-Install and initialize gomobile, then build the platform artifact:
+## Releases
 
-```bash
-go install golang.org/x/mobile/cmd/gomobile@latest
-go install golang.org/x/mobile/cmd/gobind@latest
-gomobile init
-npm run build:core:android
-# or, on macOS:
-npm run build:core:ios
-```
+Maintainer release builds are tag-driven:
 
-The generated Android AAR and iOS XCFramework are linked by the local Expo
-module. To force the preview driver instead:
+- `v1.2.3` builds Android and iOS with the EAS `production` profile.
+- `v1.2.3-beta.0` builds both platforms with the EAS `beta` profile.
 
-```bash
-EXPO_PUBLIC_TELEPORT_NATIVE_CORE=0 npx expo start --dev-client
-```
+The workflow validates the tag, derives the user-facing app version, waits for
+both EAS builds, and stores their build metadata with the workflow run. Stable
+Android builds produce an AAB for Google Play; beta Android builds produce an
+installable APK. Stable iOS builds use App Store distribution, while beta iOS
+builds use registered-device ad hoc distribution.
 
-## Browser MFA passkeys
+See [Releases](docs/releases.md) for required secrets, credentials, tagging, and
+fork setup.
 
-Passkeys use Teleport Browser MFA so users can enter arbitrary public or private
-proxy domains without Apple Associated Domains or Android Digital Asset Links.
-The Go core creates an encrypted loopback callback, the native bridge opens
-`/web/mfa/browser/:requestId` in the system browser, and Teleport sends the
-browser-owned WebAuthn assertion back to the app.
+## Contributing
 
-Browser MFA requires Teleport 18.8 or newer with CLI browser authentication
-enabled (the default when WebAuthn is configured). Private proxies work when the
-phone can resolve the hostname and its system browser trusts the proxy's CA.
-TOTP continues to work on older Teleport clusters. Per-session MFA challenges
-are not yet handled.
+Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md)
+and the [documentation index](docs/README.md) before making a larger change.
+Please review [Privacy and data flow](docs/privacy.md) and report vulnerabilities
+using the process in [SECURITY.md](SECURITY.md).
 
-## Self-signed proxy certificates
+## Credits and trademark notice
 
-The connection screen includes **Trust self-signed certificate**, equivalent to
-`tsh login --insecure`. It disables certificate-chain and hostname verification
-for the Teleport HTTPS API and terminal WebSocket. It is off by default and
-should be enabled only when the proxy identity has been verified another way.
-This setting does not affect the system browser; Browser MFA still requires a
-certificate trusted by that browser.
+Telemob exists because of [Teleport](https://github.com/gravitational/teleport),
+the open-source infrastructure access platform created by
+[Gravitational](https://goteleport.com/). Teleport's public documentation,
+source, and protocol behavior were invaluable references while building this
+client. All credit for Teleport itself belongs to its maintainers and
+contributors.
 
-See [docs/architecture.md](docs/architecture.md) for ownership boundaries,
-authentication design, transport details, and current limitations.
+The Teleport name, logo, and related marks belong to their respective owners.
+Use of the name in this repository describes compatibility only and does not
+imply endorsement or affiliation.
 
-## EAS iOS builds
+Telemob also builds on [Expo](https://expo.dev/),
+[React Native](https://reactnative.dev/), [Go](https://go.dev/),
+[`gomobile`](https://pkg.go.dev/golang.org/x/mobile/cmd/gomobile), and
+[`xterm.js`](https://xtermjs.org/), along with the other projects listed in its
+dependency manifests.
 
-The project is linked to EAS project
-`c72bfab5-a90d-4b46-8c2e-d86c2c90810c`. EAS generates the ignored Go
-XCFramework on its macOS worker before Expo prebuild and CocoaPods installation.
+## License
 
-For an installable iPhone build, register the device before starting the build:
-
-```bash
-eas device:create
-eas build --platform ios --profile preview
-```
-
-The `preview` profile creates a standalone ad hoc IPA. The `development`
-profile creates an Expo development client, and `production` is reserved for
-TestFlight or App Store distribution.
-See [docs/terminal-keyboard.md](docs/terminal-keyboard.md) for the open-source
-terminal keyboard research and the resulting v1 key set.
+Telemob is released under the [MIT License](LICENSE). Third-party dependencies
+and referenced projects remain subject to their own licenses.

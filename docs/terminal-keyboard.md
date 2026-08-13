@@ -1,36 +1,67 @@
-# Terminal keyboard rationale
+# Terminal keyboard and touch input
 
-Telemob's touch key rail is based on the shared core of established mobile
-terminal interfaces, while keeping the terminal itself full screen.
+> Telemob is an unofficial, independent client and has no affiliation with
+> Gravitational Inc. or the Teleport project.
+
+Telemob keeps the terminal full screen and uses the phone's native keyboard for
+direct input. A horizontally scrollable utility rail exposes keys that mobile
+keyboards usually omit.
 
 ## References
 
 - [Termux extra keys](https://github.com/termux/termux-app/blob/master/termux-shared/src/main/java/com/termux/shared/termux/extrakeys/ExtraKeysInfo.java)
-  uses `ESC`, `TAB`, `CTRL`, `ALT`, arrows, `HOME`, `END`, `PGUP`, and `PGDN`
-  as its representative two-row layout. It also supports literal keys and
-  macros, confirming that a touch rail should send terminal input rather than
-  operate an app-specific command layer.
-- [Blink Shell](https://github.com/blinksh/blink) keeps the terminal full screen
-  and documents Ctrl and Alt in its SmartKeys bar as continuous modifiers.
-  Telemob follows that sticky-modifier behavior: tap the modifier again to
-  release it.
-- [ConnectBot](https://github.com/connectbot/connectbot) is an established
-  native Android SSH terminal and reinforces that navigation/editing support
-  belongs in the terminal input surface, not a separate command form.
+  demonstrates a compact terminal rail containing modifiers, escape, tab,
+  navigation, paging, and macros.
+- [Blink Shell](https://github.com/blinksh/blink) demonstrates a full-screen
+  terminal with a dedicated mobile SmartKeys surface.
+- [ConnectBot](https://github.com/connectbot/connectbot) reinforces that
+  navigation and editing keys belong in the terminal input surface rather than
+  an app-specific command language.
 
-## Telemob v1 rail
+These projects informed the interaction model only. Telemob's implementation is
+its own React Native and xterm-based terminal layer.
 
-The always-available rail provides sticky `CTRL` and `ALT`, paste, optional
-whole-line input, `Ctrl+C`, `ESC`, `TAB`, four arrows, `HOME`, `END`, `PGUP`,
-`PGDN`, `INSERT`, `DELETE`, `BACKSPACE`, and `F1` through `F12`.
+## Current key rail
 
-The normal mode is direct terminal input through an invisible native text
-input. The visible whole-line form is optional because it is useful for long
-commands on a phone, but it is not the primary input model. Escape sequences
-include xterm modifier parameters so combinations such as Ctrl+Arrow and
-Alt+Function remain meaningful to remote applications.
+The rail includes:
 
-Macros, custom layouts, hardware-keyboard shortcuts, and swipe/popup keys are
-deliberately future work. They require a settings and discoverability design;
-hard-coding application-specific macros would not improve the general SSH
-terminal experience.
+- one-shot `CTRL` and `ALT` modifiers;
+- paste and optional whole-line input;
+- `Ctrl+C`, `ESC`, and `TAB`;
+- arrow, `HOME`, `END`, `PGUP`, and `PGDN` keys;
+- `INSERT`, `DELETE`, and `BACKSPACE`;
+- `F1` through `F12`.
+
+Ctrl and Alt apply to the next character or utility key and then release. This
+matches prefix-driven tools: tapping `CTRL`, typing `b`, and then typing `q`
+sends `Ctrl+B` followed by plain `q`.
+
+Navigation and function keys use xterm-compatible CSI modifier parameters.
+Paste uses bracketed paste when the remote terminal has enabled it.
+
+## Direct input and line mode
+
+Normal mode focuses an invisible native `TextInput`. Characters are sent to the
+PTY immediately and appear where the remote application echoes them. Android's
+keyboard is kept open after Return, while back-button dismissal releases focus
+so one later terminal tap can reopen it.
+
+Line mode is optional. It provides a visible mobile text field for composing a
+long command before sending it with Return. It is not a second terminal buffer
+and should not be used for interactive full-screen applications.
+
+## Mouse-aware terminal applications
+
+When the remote application enables xterm mouse tracking, Telemob translates a
+tap into an SGR button press/release at the touched terminal cell. A vertical
+swipe becomes repeated SGR wheel events. This supports buttons and scrolling in
+compatible TUIs without turning every terminal touch into remote input.
+
+When mouse tracking is disabled, swipes scroll Telemob's local terminal history
+and taps can focus the keyboard. Terminal coordinates are calculated from the
+same measured cell grid used to size the remote PTY.
+
+## Future work
+
+Custom key layouts, user-defined macros, hardware-keyboard shortcut discovery,
+selection/copy gestures, and richer multi-touch handling remain future work.

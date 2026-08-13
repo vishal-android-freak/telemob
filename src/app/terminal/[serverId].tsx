@@ -4,6 +4,7 @@ import {
   type GestureResponderEvent,
   Keyboard,
   LayoutChangeEvent,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -165,15 +166,22 @@ export default function TerminalScreen() {
   function sendTypedText(nextText: string) {
     const previousText = directInputValueRef.current;
     directInputValueRef.current = nextText;
-    if (nextText.length <= previousText.length) return;
+    if (!nextText) return;
 
     const insertedText = nextText.startsWith(previousText)
       ? nextText.slice(previousText.length)
-      : nextText;
+      : nextText.slice(Math.min(previousText.length, nextText.length));
     const sequence = terminalTextSequence(insertedText, modifiersRef.current);
     if (sequence) sendRaw(sequence);
     releaseModifiers();
-    if (nextText.length >= 128) resetDirectInput();
+
+    // A retained TextInput lets Android IMEs rewrite their entire composing
+    // buffer. Treating that rewritten value as newly inserted text duplicates
+    // an already-sent command. Drain the native field after every edit so it
+    // never becomes a second terminal buffer. Keep the ref until the native
+    // empty-value event arrives, which still makes back-to-back edits yield a
+    // suffix if clear() has not reached the UI thread yet.
+    directInputRef.current?.clear();
   }
 
   function releaseModifiers() {
@@ -468,10 +476,12 @@ export default function TerminalScreen() {
             <TextInput
               ref={directInputRef}
               autoCapitalize="none"
+              autoComplete="off"
               autoCorrect={false}
               caretHidden
               editable={connected && !lineMode}
               keyboardAppearance="dark"
+              keyboardType={Platform.OS === 'android' ? 'visible-password' : 'ascii-capable'}
               onBlur={() => {
                 directInputFocusedRef.current = false;
               }}

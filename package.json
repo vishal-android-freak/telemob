@@ -1,7 +1,18 @@
 {
   "name": "telemob",
+  "description": "Unofficial open-source mobile SSH client for Teleport.",
   "main": "expo-router/entry",
   "version": "1.0.0",
+  "license": "MIT",
+  "author": "Vishal Dubey",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vishal-android-freak/telemob.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vishal-android-freak/telemob/issues"
+  },
+  "homepage": "https://github.com/vishal-android-freak/telemob#readme",
   "dependencies": {
     "@expo-google-fonts/ibm-plex-mono": "^0.4.1",
     "@expo-google-fonts/newsreader": "^0.4.1",

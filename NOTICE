@@ -1,0 +1,18 @@
+Telemob
+Copyright (c) 2026 Vishal Dubey and Telemob contributors
+
+Telemob is an independent, unofficial community project. It is not sponsored,
+endorsed, maintained by, or affiliated with Gravitational Inc. or the Teleport
+project.
+
+Teleport is an open-source infrastructure access platform created and
+maintained by Gravitational. The Teleport name, logo, and related marks belong
+to their respective owners. References to Teleport in Telemob describe
+compatibility and give credit; they do not imply endorsement or affiliation.
+
+Teleport project: https://github.com/gravitational/teleport
+Teleport website: https://goteleport.com/
+
+Portions of the project structure and native-module scaffolding originate from
+Expo tooling and remain subject to the notices in the MIT license. Third-party
+dependencies remain subject to their own licenses.

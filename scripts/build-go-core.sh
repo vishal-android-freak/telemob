@@ -31,8 +31,9 @@ case "${platform}" in
     mkdir -p "${app_dir}/modules/expo-teleport/android/libs"
     (
       cd "${core_dir}"
-      # Telemob's supported Android device is Pixel 10 (arm64-v8a). Keeping
-      # the Go binding single-architecture also prevents accidental fat APKs.
+      # Android support is currently arm64-v8a only. Local device validation is
+      # performed on Pixel 10, and keeping the binding single-architecture
+      # prevents accidental fat APKs during this first public release line.
       gomobile bind -target=android/arm64 -androidapi 24 \
         -o "${app_dir}/modules/expo-teleport/android/libs/teleportmobile.aar" .
     )

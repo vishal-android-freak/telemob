@@ -1,14 +1,18 @@
-# Telemob architecture
+# Architecture
 
-Telemob is one Expo/React Native product with a shared Go networking core.
-Expo is the application framework, not the runtime boundary: development builds
-compile the local Swift and Kotlin module alongside the React Native app.
+> Telemob is an unofficial, independent client. It is not affiliated with,
+> endorsed by, or maintained by Gravitational Inc. or the Teleport project.
+
+Telemob is one Expo/React Native application with a shared Go networking core.
+Expo is the application framework rather than the native runtime boundary:
+development and release builds compile the local Swift or Kotlin module beside
+the React Native application.
 
 ```text
 Expo Router screens
-        │ typed JSON requests/events
+        │ typed requests, snapshots, and events
         ▼
-Expo native module (Swift / Kotlin)
+Expo native module (Swift or Kotlin)
         │ generated gomobile bindings
         ▼
 Shared Go core
@@ -17,66 +21,117 @@ Shared Go core
 Teleport proxy ──► SSH node
 ```
 
+## Repository boundaries
+
+- `src/app` owns routing and mobile screens.
+- `src/lib/teleport` owns the TypeScript client boundary, secure profile
+  restoration, and the deterministic web preview.
+- `src/lib/terminal` owns xterm parsing, screen snapshots, input sequences,
+  viewport sizing, reconnect behavior, and React subscriptions.
+- `go/teleportmobile` owns authentication, proxy requests, session state,
+  WebSocket PTY transport, output sequencing, and replay.
+- `modules/expo-teleport` exposes the Go API to Kotlin and Swift and owns native
+  platform behavior such as Browser MFA presentation and background leases.
+- `scripts/build-go-core.sh` generates the ignored Android AAR or iOS
+  XCFramework consumed by the Expo module.
+
+The generated native bindings are build products. They are deliberately not
+committed to the repository.
+
 ## Authentication ownership
 
-- The Go core starts password authentication and coordinates Teleport's MFA
-  challenge/response exchange. Passwords stay in memory and are never persisted.
-- TOTP is collected by the shared Expo UI and returned through the Go core.
-- Passkeys use Teleport Browser MFA. Go starts an encrypted loopback callback,
-  Android/iOS opens the proxy's Browser MFA page in the system browser, and the
-  proxy returns the browser-owned WebAuthn assertion to Go through that callback.
-- The resulting Teleport web session remains in the Go core's cookie jar and is
-  exported as an encrypted SecureStore snapshot. It is restored on cold launch
-  until Teleport expires it; passwords are never included.
-- Browser MFA supports proxy domains entered at runtime without Associated
-  Domains or Digital Asset Links. It requires Teleport 18.8+ and a browser that
-  trusts the proxy certificate. TOTP has no such deployment requirement.
+1. The Go core validates the proxy and starts Teleport's local-user password
+   flow. Passwords remain in memory and are never persisted.
+2. The shared UI collects a TOTP code when requested and passes it to Go.
+3. For passkeys, Go starts Teleport Browser MFA with an encrypted loopback
+   callback. The native bridge opens the proxy page in the system browser; the
+   browser owns WebAuthn and returns the result through that callback.
+4. The resulting web session remains in the Go cookie jar. Telemob exports an
+   encrypted snapshot to Expo SecureStore and restores it on cold launch until
+   Teleport rejects or expires it.
+5. An authorization failure while loading resources clears the saved profile
+   and returns the user to login.
 
-## Current vertical slice
+Browser MFA avoids requiring Associated Domains or Digital Asset Links for
+proxy hostnames entered by users. It requires Teleport 18.8 or newer and a
+system browser that trusts the proxy certificate.
 
-The app includes login, TOTP/passkey states, node discovery, login selection, and
-an interactive terminal UI. `go/teleportmobile` implements the production
-transport and defines the gomobile-safe API. Its integration tests exercise TLS
-login, CSRF protection, session cookies, node mapping, WebSocket authentication,
-and PTY byte streaming against an in-process proxy.
+## Resource and terminal transport
 
-The Kotlin and Swift bridges link the generated Go artifacts and open the system
-browser for Browser MFA. Native builds choose this bridge by default; Expo web
-and Expo Go fall back to the deterministic driver.
+The production core implements the local-user web-session flow used by the
+Teleport proxy:
 
-## Terminal and background ownership
+1. `GET /webapi/ping` validates the proxy and discovers cluster information.
+2. MFA begin and finish requests establish the authenticated web session.
+3. A short-lived bearer token and session cookie authorize node discovery.
+4. The bearer token is renewed while the underlying web session remains valid.
+5. `/v1/webapi/sites/:cluster/connect/ws` carries the authenticated terminal
+   connection and Teleport version-1 binary terminal envelopes.
 
-React screens subscribe to a process-wide terminal session manager. Route
-unmounting detaches the view but does not close SSH. The Go core assigns every
-PTY data frame a monotonic sequence and keeps a bounded 1 MiB replay window
-below React. On resume, the manager replays missing frames, sends a WebSocket
-ping, and resizes the PTY. A failed liveness check creates both a fresh SSH
-session and a fresh terminal parser, preventing stale scrollback from being
-mixed into a new shell.
+Authorization, RBAC filtering, SSH certificates, session recording, and audit
+behavior remain under the Teleport proxy's control. Telemob does not bypass the
+proxy or connect directly to SSH port 22.
 
-Android starts a `specialUse` foreground service while SSH is active, shows an
-ongoing notification, and exposes an explicit Disconnect action. iOS uses a
-finite `beginBackgroundTask` lease; iOS may suspend the process after that lease
-expires, so resume is best-effort and always includes verification. No server
-multiplexer, daemon, package, or configuration is required.
+The Go module does not import Teleport's internal `lib/client` package. It keeps
+the mobile binary smaller by implementing the required web and WebSocket
+boundary with `gorilla/websocket`. Teleport's own code and documentation remain
+under their respective licenses.
 
-## Production transport
+## Terminal rendering and input
 
-The Go core uses Teleport's local-user web-session flow:
+`@xterm/headless` parses the remote byte stream and provides a canonical screen
+buffer. Telemob snapshots that buffer into fixed terminal rows and cell
+positions for React Native. Glyphs are painted independently from cell
+backgrounds so Android font metrics cannot clip text or shift a TUI grid.
 
-1. `GET /webapi/ping` validates the proxy and discovers the cluster.
-2. MFA begin/finish endpoints complete password + TOTP or Browser MFA login.
-3. A short-lived bearer token and secure session cookie authorize node listing.
-4. The token is renewed before expiry while the web session remains valid.
-5. Terminal sessions use `/v1/webapi/sites/:cluster/connect/ws`, authenticate
-   over the socket, and exchange Teleport version-1 binary terminal envelopes.
+The PTY size is derived from the measured viewport. Ordinary shell screens use
+a compact font; alternate-screen TUIs use a larger font and receive the true
+resulting row and column count. There is no hard-coded 80- or 84-column PTY.
 
-This keeps node authorization, session recording, and audit behavior on the
-Teleport proxy. SSO, app/database access, file transfer, session joining, and
-per-session WebAuthn challenges remain outside the first build.
+Touch taps and swipes become standard SGR mouse events only when xterm reports
+that the remote application enabled mouse tracking. Keyboard input otherwise
+passes through as terminal bytes. Ctrl and Alt are one-shot modifiers for the
+next key, avoiding a prefix sequence such as `Ctrl+B`, `Q` becoming
+`Ctrl+B`, `Ctrl+Q`.
 
-The mobile core does not import Teleport's `lib/client`; it implements the web
-API and terminal envelope boundary with a small WebSocket dependency. Teleport's
-repository and protocol implementation are AGPL-licensed, so distribution still
-needs an explicit legal/licensing review rather than an assumption based only on
-the dependency graph.
+## Session and background ownership
+
+The React terminal screen subscribes to a process-wide session manager. Route
+unmounting detaches the view but does not close SSH. The Go core assigns PTY
+frames a monotonic sequence and retains a bounded 1 MiB replay window below
+React. On resume, the manager fetches missed frames, pings the WebSocket, and
+resizes the PTY. A failed check creates a new SSH session and a fresh terminal
+parser so old output is not appended to a replacement shell.
+
+Android starts a user-visible foreground service while SSH is active and adds a
+Disconnect notification action. If notification permission is denied, Android
+still requires the foreground service but may surface its notice only in the
+system's active-apps UI, depending on OS behavior.
+
+iOS uses `beginBackgroundTask`, which provides only a finite execution window.
+The connection is therefore best-effort in the background and is always checked
+when the app becomes active again. No target-side multiplexer, daemon, package,
+or configuration is required.
+
+## Trust boundary
+
+Normal connections use the phone's trusted certificate authorities and verify
+the proxy hostname. The explicit insecure TLS option disables both checks for
+Telemob's own HTTPS and WebSocket traffic. It does not and cannot modify the
+system browser's certificate policy.
+
+SecureStore protects the serialized session at rest using platform facilities.
+It does not make a compromised or unlocked device a trusted environment. The
+Teleport proxy remains the source of truth for expiration and authorization.
+
+## Intentionally unsupported today
+
+- SSO and identity-provider login.
+- Application, database, Kubernetes, and desktop resources.
+- File transfer, agent forwarding, port forwarding, and session joining.
+- Per-session MFA and native platform passkey association.
+- Indefinite iOS background execution.
+- Android ABIs other than `arm64-v8a`.
+
+See [Development](development.md) for build details and [Releases](releases.md)
+for the signed-build pipeline.

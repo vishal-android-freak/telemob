@@ -13,12 +13,22 @@
     },
     "preview": {
       "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
       "ios": {
         "image": "sdk-57"
       }
     },
+    "beta": {
+      "extends": "preview",
+      "autoIncrement": true
+    },
     "production": {
       "autoIncrement": true,
+      "android": {
+        "buildType": "app-bundle"
+      },
       "ios": {
         "image": "sdk-57"
       }
