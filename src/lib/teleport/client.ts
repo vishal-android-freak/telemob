@@ -247,14 +247,7 @@ class DevelopmentTeleportClient implements TeleportClient {
       return {
         kind: 'passkey',
         challengeId,
-        rpId: hostnameFromAddress(request.proxyAddress),
-        challenge: 'development-passkey-challenge',
-        allowedCredentialIds: [],
-        requestJson: JSON.stringify({
-          challenge: 'development-passkey-challenge',
-          rpId: hostnameFromAddress(request.proxyAddress),
-          allowCredentials: [],
-        }),
+        browserUrl: `https://${request.proxyAddress.replace(/\/$/, '')}/web/mfa/browser/development-request`,
       };
     }
     return { kind: 'totp', challengeId, digits: 6 };
@@ -393,10 +386,6 @@ function developmentProfile(): AuthenticatedProfile {
     clusterName: 'teleport.example.com',
     validUntil: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString(),
   };
-}
-
-function hostnameFromAddress(address: string) {
-  return address.replace(/^https?:\/\//, '').split(':')[0];
 }
 
 function developmentTerminalResponse(

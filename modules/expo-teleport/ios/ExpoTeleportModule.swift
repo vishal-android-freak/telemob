@@ -1,12 +1,10 @@
-import AuthenticationServices
 import ExpoModulesCore
 import Teleportmobile
 import UIKit
 
 public final class ExpoTeleportModule: Module {
   private let core = TeleportmobileNewCore()!
-  private var passkeyRequests: [String: PasskeyRequest] = [:]
-  private var passkeyCeremony: PasskeyCeremony?
+  private var browserMFARequests: [String: URL] = [:]
   private lazy var eventSink = TerminalEventSink { [weak self] event in
     guard
       let data = event.data(using: .utf8),
@@ -36,8 +34,7 @@ public final class ExpoTeleportModule: Module {
 
     OnDestroy {
       core.setEventSink(nil)
-      passkeyRequests.removeAll()
-      passkeyCeremony = nil
+      browserMFARequests.removeAll()
     }
 
     AsyncFunction("getCapabilitiesAsync") {
@@ -59,14 +56,21 @@ public final class ExpoTeleportModule: Module {
     AsyncFunction("logoutAsync") {
       core.logout()
       BackgroundTerminalLease.shared.stopAll()
-      passkeyRequests.removeAll()
-      passkeyCeremony = nil
+      BrowserMFALease.shared.stop()
+      browserMFARequests.removeAll()
     }
 
     AsyncFunction("beginLoginAsync") { (requestJSON: String) throws -> String in
       let challengeJSON = try core.beginLoginJSON(requestJSON)
-      if let request = try? PasskeyRequest(challengeJSON: challengeJSON) {
-        passkeyRequests[request.challengeID] = request
+      if
+        let data = challengeJSON.data(using: .utf8),
+        let challenge = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        challenge["kind"] as? String == "passkey",
+        let challengeID = challenge["challengeId"] as? String,
+        let browserURLString = challenge["browserUrl"] as? String,
+        let browserURL = URL(string: browserURLString)
+      {
+        browserMFARequests[challengeID] = browserURL
       }
       return challengeJSON
     }
@@ -88,33 +92,37 @@ public final class ExpoTeleportModule: Module {
         }
         return
       }
-      guard let request = passkeyRequests[challengeID] else {
-        promise.reject(PasskeyChallengeException())
+      guard let browserURL = browserMFARequests[challengeID] else {
+        promise.reject(BrowserMFAChallengeException())
         return
       }
-      guard let anchor = appContext?.utilities?.currentViewController()?.view.window else {
-        promise.reject(PasskeyPresentationException())
-        return
-      }
-
-      let ceremony = PasskeyCeremony(request: request, anchor: anchor) { [weak self] result in
+      BrowserMFALease.shared.start()
+      UIApplication.shared.open(browserURL) { [weak self] opened in
         guard let self else {
+          BrowserMFALease.shared.stop()
           promise.reject(ModuleUnavailableException())
           return
         }
-        defer {
-          passkeyRequests.removeValue(forKey: challengeID)
-          passkeyCeremony = nil
+        guard opened else {
+          BrowserMFALease.shared.stop()
+          browserMFARequests.removeValue(forKey: challengeID)
+          promise.reject(BrowserMFAPresentationException())
+          return
         }
-        do {
-          let assertionJSON = try result.get()
-          promise.resolve(try core.finishPasskey(challengeID, credentialJSON: assertionJSON))
-        } catch {
-          promise.reject(error)
+        DispatchQueue.global(qos: .userInitiated).async {
+          defer {
+            DispatchQueue.main.async {
+              self.browserMFARequests.removeValue(forKey: challengeID)
+              BrowserMFALease.shared.stop()
+            }
+          }
+          do {
+            promise.resolve(try self.core.finishPasskey(challengeID, credentialJSON: ""))
+          } catch {
+            promise.reject(error)
+          }
         }
       }
-      passkeyCeremony = ceremony
-      ceremony.perform()
     }.runOnQueue(.main)
 
     AsyncFunction("listServersAsync") { () throws -> String in
@@ -194,6 +202,24 @@ private final class BackgroundTerminalLease {
   }
 }
 
+private final class BrowserMFALease {
+  static let shared = BrowserMFALease()
+  private var identifier: UIBackgroundTaskIdentifier = .invalid
+
+  func start() {
+    stop()
+    identifier = UIApplication.shared.beginBackgroundTask(withName: "Telemob Browser MFA") { [weak self] in
+      self?.stop()
+    }
+  }
+
+  func stop() {
+    guard identifier != .invalid else { return }
+    UIApplication.shared.endBackgroundTask(identifier)
+    identifier = .invalid
+  }
+}
+
 private final class TerminalEventSink: NSObject, TeleportmobileEventSink {
   private let handler: (String) -> Void
 
@@ -208,137 +234,12 @@ private final class TerminalEventSink: NSObject, TeleportmobileEventSink {
   }
 }
 
-private struct PasskeyRequest {
-  let challengeID: String
-  let relyingPartyID: String
-  let challenge: Data
-  let allowedCredentialIDs: [Data]
-  let userVerification: String
-
-  init(challengeJSON: String) throws {
-    guard
-      let data = challengeJSON.data(using: .utf8),
-      let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-      root["kind"] as? String == "passkey",
-      let challengeID = root["challengeId"] as? String,
-      let requestJSON = root["requestJson"] as? String,
-      let requestData = requestJSON.data(using: .utf8),
-      let options = try JSONSerialization.jsonObject(with: requestData) as? [String: Any],
-      let relyingPartyID = options["rpId"] as? String,
-      let challengeString = options["challenge"] as? String,
-      let challenge = Data(base64URLEncoded: challengeString)
-    else {
-      throw PasskeyChallengeException()
-    }
-    self.challengeID = challengeID
-    self.relyingPartyID = relyingPartyID
-    self.challenge = challenge
-    self.userVerification = options["userVerification"] as? String ?? "preferred"
-    self.allowedCredentialIDs = (options["allowCredentials"] as? [[String: Any]] ?? []).compactMap {
-      guard let identifier = $0["id"] as? String else { return nil }
-      return Data(base64URLEncoded: identifier)
-    }
-  }
+private final class BrowserMFAChallengeException: Exception, @unchecked Sendable {
+  override var reason: String { "The Browser MFA challenge is missing or expired." }
 }
 
-@available(iOS 16.0, *)
-private final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
-  private let request: PasskeyRequest
-  private let anchor: ASPresentationAnchor
-  private let completion: (Result<String, Error>) -> Void
-
-  init(request: PasskeyRequest, anchor: ASPresentationAnchor, completion: @escaping (Result<String, Error>) -> Void) {
-    self.request = request
-    self.anchor = anchor
-    self.completion = completion
-  }
-
-  func perform() {
-    let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: request.relyingPartyID)
-    let assertion = provider.createCredentialAssertionRequest(challenge: request.challenge)
-    assertion.allowedCredentials = request.allowedCredentialIDs.map {
-      ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: $0)
-    }
-    switch request.userVerification {
-    case "required":
-      assertion.userVerificationPreference = .required
-    case "discouraged":
-      assertion.userVerificationPreference = .discouraged
-    default:
-      assertion.userVerificationPreference = .preferred
-    }
-    let controller = ASAuthorizationController(authorizationRequests: [assertion])
-    controller.delegate = self
-    controller.presentationContextProvider = self
-    controller.performRequests()
-  }
-
-  func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
-    anchor
-  }
-
-  func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
-    guard let assertion = authorization.credential as? ASAuthorizationPlatformPublicKeyCredentialAssertion else {
-      completion(.failure(UnexpectedPasskeyException()))
-      return
-    }
-    let identifier = assertion.credentialID.base64URLEncodedString()
-    var response: [String: Any] = [
-      "authenticatorData": assertion.rawAuthenticatorData.base64URLEncodedString(),
-      "clientDataJSON": assertion.rawClientDataJSON.base64URLEncodedString(),
-      "signature": assertion.signature.base64URLEncodedString(),
-    ]
-    if !assertion.userID.isEmpty {
-      response["userHandle"] = assertion.userID.base64URLEncodedString()
-    }
-    let credential: [String: Any] = [
-      "id": identifier,
-      "rawId": identifier,
-      "type": "public-key",
-      "response": response,
-      "extensions": [:],
-    ]
-    do {
-      let encoded = try JSONSerialization.data(withJSONObject: credential)
-      guard let json = String(data: encoded, encoding: .utf8) else {
-        throw UnexpectedPasskeyException()
-      }
-      completion(.success(json))
-    } catch {
-      completion(.failure(error))
-    }
-  }
-
-  func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
-    completion(.failure(error))
-  }
-}
-
-private extension Data {
-  init?(base64URLEncoded value: String) {
-    var base64 = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-    base64.append(String(repeating: "=", count: (4 - base64.count % 4) % 4))
-    self.init(base64Encoded: base64)
-  }
-
-  func base64URLEncodedString() -> String {
-    base64EncodedString()
-      .replacingOccurrences(of: "+", with: "-")
-      .replacingOccurrences(of: "/", with: "_")
-      .replacingOccurrences(of: "=", with: "")
-  }
-}
-
-private final class PasskeyChallengeException: Exception, @unchecked Sendable {
-  override var reason: String { "The passkey challenge is missing or invalid." }
-}
-
-private final class PasskeyPresentationException: Exception, @unchecked Sendable {
-  override var reason: String { "The app must be visible to request a passkey." }
-}
-
-private final class UnexpectedPasskeyException: Exception, @unchecked Sendable {
-  override var reason: String { "The selected authorization is not a passkey assertion." }
+private final class BrowserMFAPresentationException: Exception, @unchecked Sendable {
+  override var reason: String { "The system browser could not open Browser MFA." }
 }
 
 private final class ModuleUnavailableException: Exception, @unchecked Sendable {

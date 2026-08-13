@@ -23,6 +23,10 @@ import {
   loadSessionSnapshot,
   saveSessionSnapshot,
 } from '@/lib/teleport/profile-store';
+import {
+  getTerminalSessionManager,
+  type TerminalConnectionState,
+} from '@/lib/terminal/session-manager';
 import type { AuthenticatedProfile, TeleportServer } from '@/types/teleport';
 
 export default function ServersScreen() {
@@ -32,6 +36,15 @@ export default function ServersScreen() {
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [terminalManager] = useState(getTerminalSessionManager);
+  const [terminalSession, setTerminalSession] = useState(terminalManager.getSnapshot);
+
+  useEffect(() => {
+    const unsubscribe = terminalManager.subscribe(setTerminalSession);
+    return () => {
+      unsubscribe();
+    };
+  }, [terminalManager]);
 
   useEffect(() => {
     let active = true;
@@ -91,6 +104,10 @@ export default function ServersScreen() {
     );
   }, [query, servers]);
 
+  const activeTarget = isActiveTerminalState(terminalSession.state)
+    ? terminalSession.target
+    : undefined;
+
   async function signOut() {
     await Promise.all([clearProfile(), getTeleportClient().logout()]);
     router.replace('/');
@@ -135,7 +152,12 @@ export default function ServersScreen() {
           <View style={styles.serverList}>
             <Text style={styles.count}>{filtered.length} nodes available</Text>
             {filtered.map(server => (
-              <ServerCard key={server.id} server={server} onOpen={openServer} />
+              <ServerCard
+                activeLogin={activeTarget?.serverId === server.id ? activeTarget.login : undefined}
+                key={server.id}
+                server={server}
+                onOpen={openServer}
+              />
             ))}
             {!filtered.length && (
               <Notice>No nodes match this filter.</Notice>
@@ -148,14 +170,16 @@ export default function ServersScreen() {
 }
 
 function ServerCard({
+  activeLogin,
   server,
   onOpen,
 }: {
+  activeLogin?: string;
   server: TeleportServer;
   onOpen: (server: TeleportServer, login: string) => void;
 }) {
   return (
-    <Panel style={styles.serverCard}>
+    <Panel style={[styles.serverCard, activeLogin && styles.serverCardActive]}>
       <View style={styles.serverHeader}>
         <View style={styles.hostBlock}>
           <View
@@ -169,7 +193,15 @@ function ServerCard({
             <Text style={styles.address}>{server.address}</Text>
           </View>
         </View>
-        <Text style={styles.arrow}>↗</Text>
+        <View style={styles.serverAction}>
+          {activeLogin ? (
+            <View style={styles.activeBadge}>
+              <View style={styles.activeBadgeDot} />
+              <Text style={styles.activeBadgeText}>Session active</Text>
+            </View>
+          ) : null}
+          <Text style={styles.arrow}>↗</Text>
+        </View>
       </View>
 
       <View style={styles.labels}>
@@ -186,14 +218,18 @@ function ServerCard({
           {(server.logins ?? []).map(login => (
             <Pressable
               accessibilityRole="button"
+              accessibilityState={{ selected: activeLogin === login }}
               key={login}
               onPress={() => onOpen(server, login)}
               style={({ pressed }) => [
                 styles.loginButton,
+                activeLogin === login && styles.loginButtonActive,
                 pressed && styles.pressed,
               ]}
             >
-              <Text style={styles.loginText}>{login}</Text>
+              <Text style={[styles.loginText, activeLogin === login && styles.loginTextActive]}>
+                {login}{activeLogin === login ? ' · active' : ''}
+              </Text>
             </Pressable>
           ))}
           {!server.logins?.length ? (
@@ -213,6 +249,13 @@ function isForbidden(error: unknown) {
   return /\bHTTP 403\b/i.test(messageFrom(error));
 }
 
+function isActiveTerminalState(state: TerminalConnectionState) {
+  return state === 'connecting'
+    || state === 'connected'
+    || state === 'checking'
+    || state === 'reconnecting';
+}
+
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: palette.ink },
   content: { padding: space.lg, paddingBottom: space.xxl, gap: space.lg },
@@ -227,12 +270,17 @@ const styles = StyleSheet.create({
   serverList: { gap: space.md },
   count: { color: palette.quiet, fontFamily: type.mono, fontSize: 10, letterSpacing: 0.7, textTransform: 'uppercase' },
   serverCard: { gap: space.md },
+  serverCardActive: { borderColor: palette.signal },
   serverHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   hostBlock: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   statusDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: palette.signal },
   statusUnknown: { backgroundColor: palette.warning },
   hostname: { color: palette.porcelain, fontFamily: type.monoStrong, fontSize: 15 },
   address: { color: palette.quiet, fontFamily: type.mono, fontSize: 10, marginTop: 3 },
+  serverAction: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  activeBadge: { flexDirection: 'row', alignItems: 'center', gap: space.xs, borderRadius: radius.pill, backgroundColor: palette.raised, paddingHorizontal: space.sm, paddingVertical: 5 },
+  activeBadgeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: palette.signal },
+  activeBadgeText: { color: palette.signal, fontFamily: type.monoMedium, fontSize: 8, textTransform: 'uppercase', letterSpacing: 0.5 },
   arrow: { color: palette.copper, fontFamily: type.monoStrong, fontSize: 20 },
   labels: { flexDirection: 'row', flexWrap: 'wrap', gap: space.xs },
   label: { color: palette.mist, backgroundColor: palette.raised, borderRadius: radius.pill, paddingHorizontal: space.sm, paddingVertical: 5, fontFamily: type.mono, fontSize: 9 },
@@ -240,7 +288,9 @@ const styles = StyleSheet.create({
   loginCaption: { color: palette.quiet, fontFamily: type.mono, fontSize: 9, textTransform: 'uppercase', letterSpacing: 0.8 },
   loginChoices: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
   loginButton: { borderColor: palette.copperMuted, borderWidth: 1, borderRadius: radius.sm, paddingHorizontal: space.md, paddingVertical: space.sm },
+  loginButtonActive: { borderColor: palette.signal, backgroundColor: palette.raised },
   loginText: { color: palette.copper, fontFamily: type.monoMedium, fontSize: 11 },
+  loginTextActive: { color: palette.signal },
   noLogins: { color: palette.warning, fontFamily: type.mono, fontSize: 10 },
   pressed: { opacity: 0.65 },
 });

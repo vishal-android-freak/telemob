@@ -1,6 +1,8 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
+  type GestureResponderEvent,
+  Keyboard,
   LayoutChangeEvent,
   Pressable,
   ScrollView,
@@ -29,6 +31,7 @@ const TERMINAL_LINE_HEIGHT_RATIO = 20 / 13;
 const TERMINAL_PADDING = 12;
 const INITIAL_SIZE = { columns: MIN_TERMINAL_COLUMNS, rows: 40 };
 const INITIAL_FONT_METRICS = { fontSize: 7.5, lineHeight: 7.5 * TERMINAL_LINE_HEIGHT_RATIO };
+const TERMINAL_TAP_SLOP = 8;
 
 export default function TerminalScreen() {
   const router = useRouter();
@@ -43,12 +46,16 @@ export default function TerminalScreen() {
   const [fontMetrics, setFontMetrics] = useState(INITIAL_FONT_METRICS);
   const [command, setCommand] = useState('');
   const [lineMode, setLineMode] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   const [modifiers, setModifiers] = useState<TerminalModifiers>({ ctrl: false, alt: false });
   const dimensionsRef = useRef(INITIAL_SIZE);
   const scrollRef = useRef<ScrollView>(null);
   const directInputRef = useRef<TextInput>(null);
   const directInputValueRef = useRef('');
+  const directInputFocusedRef = useRef(false);
+  const keyboardVisibleRef = useRef(Keyboard.isVisible());
   const lineInputRef = useRef<TextInput>(null);
+  const terminalTouchRef = useRef({ pageX: 0, pageY: 0, moved: false });
   const connected = session.state === 'connected';
 
   useEffect(() => {
@@ -64,6 +71,24 @@ export default function TerminalScreen() {
       manager.detach();
     };
   }, [manager, params.hostname, params.login, params.serverId]);
+
+  useEffect(() => {
+    const shown = Keyboard.addListener('keyboardDidShow', () => {
+      keyboardVisibleRef.current = true;
+    });
+    const hidden = Keyboard.addListener('keyboardDidHide', () => {
+      keyboardVisibleRef.current = false;
+      // Android Back hides the IME without reliably blurring the focused
+      // TextInput. Explicitly release it so the next terminal tap can focus it
+      // and open the keyboard in one attempt.
+      directInputRef.current?.blur();
+      lineInputRef.current?.blur();
+    });
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, []);
 
   function resizeTerminal(event: LayoutChangeEvent) {
     const { width, height } = event.nativeEvent.layout;
@@ -128,6 +153,46 @@ export default function TerminalScreen() {
     directInputRef.current?.clear();
   }
 
+  function startTerminalTouch(event: GestureResponderEvent) {
+    const { pageX, pageY } = event.nativeEvent;
+    terminalTouchRef.current = { pageX, pageY, moved: false };
+  }
+
+  function moveTerminalTouch(event: GestureResponderEvent) {
+    const touch = terminalTouchRef.current;
+    const { pageX, pageY } = event.nativeEvent;
+    if (
+      Math.abs(pageX - touch.pageX) > TERMINAL_TAP_SLOP
+      || Math.abs(pageY - touch.pageY) > TERMINAL_TAP_SLOP
+    ) {
+      touch.moved = true;
+    }
+  }
+
+  function finishTerminalTouch() {
+    if (
+      !terminalTouchRef.current.moved
+      && connected
+      && !lineMode
+      && !keyboardVisibleRef.current
+      && !directInputFocusedRef.current
+    ) {
+      directInputRef.current?.focus();
+    }
+    terminalTouchRef.current.moved = false;
+  }
+
+  async function disconnectTerminal() {
+    if (disconnecting) return;
+    setDisconnecting(true);
+    try {
+      await manager.disconnect();
+      router.replace('/servers');
+    } catch {
+      setDisconnecting(false);
+    }
+  }
+
   async function pasteClipboard() {
     try {
       const text = await readClipboardText();
@@ -173,22 +238,48 @@ export default function TerminalScreen() {
                 <Text style={styles.login}>{params.login}@</Text>{params.hostname}
               </Text>
             </View>
-            <View style={styles.sessionState}>
-              <Text style={styles.dimensions}>{dimensions.columns}×{dimensions.rows}</Text>
-              <View style={[styles.liveDot, !connected && styles.liveDotWaiting]} />
+            <View style={styles.headerActions}>
+              <View style={styles.sessionState}>
+                <Text style={styles.dimensions}>{dimensions.columns}×{dimensions.rows}</Text>
+                <View style={[styles.liveDot, !connected && styles.liveDotWaiting]} />
+              </View>
+              <Pressable
+                accessibilityLabel="Disconnect terminal session"
+                accessibilityRole="button"
+                disabled={disconnecting}
+                hitSlop={6}
+                onPress={disconnectTerminal}
+                style={({ pressed }) => [
+                  styles.disconnectButton,
+                  disconnecting && styles.disconnectButtonDisabled,
+                  pressed && styles.disconnectButtonPressed,
+                ]}
+              >
+                <Text style={styles.disconnectText}>
+                  {disconnecting ? 'Closing…' : 'Disconnect'}
+                </Text>
+              </Pressable>
             </View>
           </View>
 
           <View
             onLayout={resizeTerminal}
-            onTouchStart={() => directInputRef.current?.focus()}
+            onTouchCancel={() => {
+              terminalTouchRef.current.moved = true;
+            }}
+            onTouchEnd={finishTerminalTouch}
+            onTouchMove={moveTerminalTouch}
+            onTouchStart={startTerminalTouch}
             style={styles.terminalViewport}
           >
             <ScrollView
               ref={scrollRef}
               contentContainerStyle={styles.terminalContent}
-              keyboardShouldPersistTaps="handled"
+              keyboardShouldPersistTaps="always"
               onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
+              onScrollBeginDrag={() => {
+                terminalTouchRef.current.moved = true;
+              }}
             >
               {session.lines.map((line, lineIndex) => (
                 <Text
@@ -233,7 +324,13 @@ export default function TerminalScreen() {
               caretHidden
               editable={connected && !lineMode}
               keyboardAppearance="dark"
+              onBlur={() => {
+                directInputFocusedRef.current = false;
+              }}
               onChangeText={sendTypedText}
+              onFocus={() => {
+                directInputFocusedRef.current = true;
+              }}
               onKeyPress={event => {
                 if (event.nativeEvent.key === 'Backspace') sendTerminalKey('backspace');
               }}
@@ -244,6 +341,7 @@ export default function TerminalScreen() {
               returnKeyType="send"
               spellCheck={false}
               style={styles.directInput}
+              submitBehavior="submit"
             />
           </View>
 
@@ -294,6 +392,7 @@ export default function TerminalScreen() {
                   selectionColor={palette.copper}
                   spellCheck={false}
                   style={styles.command}
+                  submitBehavior="submit"
                   value={command}
                 />
                 <Pressable
@@ -364,10 +463,21 @@ const styles = StyleSheet.create({
   target: { flex: 1, minWidth: 0, alignItems: 'center' },
   targetText: { color: palette.porcelain, fontFamily: type.monoStrong, fontSize: 11 },
   login: { color: palette.quiet, fontFamily: type.mono },
-  sessionState: { width: 52, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 7 },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  sessionState: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 7 },
   dimensions: { color: palette.quiet, fontFamily: type.mono, fontSize: 8 },
   liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: palette.signal },
   liveDotWaiting: { backgroundColor: palette.warning },
+  disconnectButton: {
+    minHeight: 28,
+    justifyContent: 'center',
+    borderColor: palette.danger,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: space.sm,
+  },
+  disconnectButtonDisabled: { opacity: 0.55 },
+  disconnectButtonPressed: { backgroundColor: palette.raised },
+  disconnectText: { color: palette.danger, fontFamily: type.monoMedium, fontSize: 9 },
   terminalViewport: { flex: 1, backgroundColor: palette.terminal },
   terminalContent: { padding: TERMINAL_PADDING, flexGrow: 1 },
   outputLine: { color: palette.porcelain, fontFamily: type.mono },

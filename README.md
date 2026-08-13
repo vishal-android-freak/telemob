@@ -12,7 +12,7 @@ The current vertical slice includes:
 - node discovery, filtering, and SSH-login selection;
 - a full-screen mobile terminal with direct typing, paste, sticky Ctrl/Alt,
   navigation/editing keys, F1–F12, and optional whole-line input;
-- Teleport local-user login with TOTP and platform passkeys;
+- Teleport local-user login with TOTP and Browser MFA passkeys;
 - RBAC-filtered node discovery over the Teleport web API;
 - an audited PTY session over Teleport's authenticated WebSocket transport;
 - Swift and Kotlin bridges to the same Go implementation;
@@ -103,27 +103,19 @@ module. To force the preview driver instead:
 EXPO_PUBLIC_TELEPORT_NATIVE_CORE=0 npx expo start --dev-client
 ```
 
-## Passkey domain setup
+## Browser MFA passkeys
 
-Passkeys are bound to a relying-party domain. A general mobile app cannot ask
-iOS or Android for a passkey belonging to an unrelated domain. Each Teleport
-proxy that should support passkeys must explicitly associate its domain with
-this app:
+Passkeys use Teleport Browser MFA so users can enter arbitrary public or private
+proxy domains without Apple Associated Domains or Android Digital Asset Links.
+The Go core creates an encrypted loopback callback, the native bridge opens
+`/web/mfa/browser/:requestId` in the system browser, and Teleport sends the
+browser-owned WebAuthn assertion back to the app.
 
-1. Serve an Apple `apple-app-site-association` file and an Android
-   `.well-known/assetlinks.json` file from the proxy domain.
-2. Include the Android package `com.naarang.telemob` and the production signing
-   certificate fingerprint in the Digital Asset Links statement.
-3. Add every iOS proxy domain at build time:
-
-   ```bash
-   EXPO_TELEPORT_PASSKEY_DOMAINS=teleport.example.com npm run build:core:ios
-   EXPO_TELEPORT_PASSKEY_DOMAINS=teleport.example.com npx expo prebuild --platform ios
-   ```
-
-TOTP does not require domain association. Per-session MFA challenges are not yet
-handled; clusters that require a second passkey ceremony for every SSH session
-will show a clear terminal error after login.
+Browser MFA requires Teleport 18.8 or newer with CLI browser authentication
+enabled (the default when WebAuthn is configured). Private proxies work when the
+phone can resolve the hostname and its system browser trusts the proxy's CA.
+TOTP continues to work on older Teleport clusters. Per-session MFA challenges
+are not yet handled.
 
 ## Self-signed proxy certificates
 
@@ -131,8 +123,8 @@ The connection screen includes **Trust self-signed certificate**, equivalent to
 `tsh login --insecure`. It disables certificate-chain and hostname verification
 for the Teleport HTTPS API and terminal WebSocket. It is off by default and
 should be enabled only when the proxy identity has been verified another way.
-This setting cannot bypass iOS or Android passkey-domain association checks;
-passkeys still require a certificate the operating system trusts.
+This setting does not affect the system browser; Browser MFA still requires a
+certificate trusted by that browser.
 
 See [docs/architecture.md](docs/architecture.md) for ownership boundaries,
 authentication design, transport details, and current limitations.

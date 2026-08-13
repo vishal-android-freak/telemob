@@ -1,9 +1,15 @@
 package teleportmobile
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -246,15 +252,25 @@ func TestWebTransportTOTPListsNodesAndStreamsTerminal(t *testing.T) {
 	transport.closeSession(session.ID)
 }
 
-func TestWebTransportPasskeyForwardsAssertion(t *testing.T) {
+func TestWebTransportBrowserMFAForwardsAssertion(t *testing.T) {
 	mux := http.NewServeMux()
+	var callbackURL string
 	mux.HandleFunc("/webapi/ping", func(response http.ResponseWriter, request *http.Request) {
 		writeTestJSON(t, response, map[string]any{"cluster_name": "example.test", "auth": map[string]any{"type": "local", "second_factor": "webauthn"}})
 	})
 	mux.HandleFunc("/v1/webapi/mfa/login/begin", func(response http.ResponseWriter, request *http.Request) {
-		writeTestJSON(t, response, map[string]any{"webauthn_challenge": map[string]any{"publicKey": map[string]any{
-			"challenge": "base64url-challenge", "rpId": "example.test", "allowCredentials": []map[string]any{{"id": "credential-id", "type": "public-key"}},
-		}}})
+		var body map[string]string
+		readTestJSON(t, request, &body)
+		callbackURL = body["browser_mfa_tsh_redirect_url"]
+		if callbackURL == "" {
+			t.Error("Browser MFA callback URL is missing")
+		}
+		writeTestJSON(t, response, map[string]any{
+			"webauthn_challenge": map[string]any{"publicKey": map[string]any{
+				"challenge": "base64url-challenge", "rpId": "example.test", "allowCredentials": []map[string]any{{"id": "credential-id", "type": "public-key"}},
+			}},
+			"browser_challenge": map[string]any{"requestId": "browser-request"},
+		})
 	})
 	mux.HandleFunc("/v1/webapi/mfa/login/finishsession", func(response http.ResponseWriter, request *http.Request) {
 		var body map[string]any
@@ -276,19 +292,90 @@ func TestWebTransportPasskeyForwardsAssertion(t *testing.T) {
 	}
 	var challenge struct {
 		ChallengeID string `json:"challengeId"`
-		RPID        string `json:"rpId"`
-		RequestJSON string `json:"requestJson"`
+		BrowserURL  string `json:"browserUrl"`
 	}
 	if err := json.Unmarshal([]byte(challengeJSON), &challenge); err != nil {
 		t.Fatal(err)
 	}
-	if challenge.RPID != "example.test" || !strings.Contains(challenge.RequestJSON, "base64url-challenge") {
+	if !strings.HasSuffix(challenge.BrowserURL, "/web/mfa/browser/browser-request") {
 		t.Fatalf("unexpected passkey challenge: %s", challengeJSON)
 	}
-	assertion := `{"id":"credential-id","rawId":"credential-id","type":"public-key","response":{"authenticatorData":"a","clientDataJSON":"b","signature":"c"},"clientExtensionResults":{}}`
-	if _, err := transport.finishPasskey(challenge.ChallengeID, assertion); err != nil {
+	assertion := json.RawMessage(`{"id":"credential-id","rawId":"credential-id","type":"public-key","response":{"authenticatorData":"a","clientDataJSON":"b","signature":"c"},"extensions":{}}`)
+	callback, err := url.Parse(callbackURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := hex.DecodeString(callback.Query().Get("secret_key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := json.Marshal(map[string]any{"browser_mfa_webauthn_response": assertion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed := sealBrowserMFAResponse(t, key, plaintext)
+	query := callback.Query()
+	query.Set("response", string(sealed))
+	callback.RawQuery = query.Encode()
+	callbackResponse, err := http.Get(callback.String())
+	if err != nil {
+		t.Fatalf("Browser MFA callback error = %v", err)
+	}
+	_ = callbackResponse.Body.Close()
+	if _, err := transport.finishPasskey(challenge.ChallengeID, ""); err != nil {
 		t.Fatalf("finishPasskey() error = %v", err)
 	}
+}
+
+func TestWebTransportBrowserMFARequiresSupportedProxy(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/webapi/ping", func(response http.ResponseWriter, request *http.Request) {
+		writeTestJSON(t, response, map[string]any{
+			"cluster_name":   "example.test",
+			"server_version": "15.5.4",
+			"auth":           map[string]any{"type": "local", "second_factor": "webauthn"},
+		})
+	})
+	mux.HandleFunc("/v1/webapi/mfa/login/begin", func(response http.ResponseWriter, request *http.Request) {
+		writeTestJSON(t, response, map[string]any{
+			"webauthn_challenge": map[string]any{"publicKey": map[string]any{"challenge": "legacy-native-challenge"}},
+		})
+	})
+	server := httptest.NewTLSServer(mux)
+	defer server.Close()
+
+	transport := newWebTransport(false)
+	_, err := transport.beginLogin(`{"proxyAddress":"` + server.URL + `","username":"alice","password":"secret","method":"passkey","insecure":true}`)
+	if err == nil || !strings.Contains(err.Error(), "Teleport 18.8 or newer") {
+		t.Fatalf("beginLogin() error = %v, want Browser MFA compatibility guidance", err)
+	}
+	if len(transport.pending) != 0 {
+		t.Fatalf("unsupported Browser MFA left %d pending login(s)", len(transport.pending))
+	}
+}
+
+func sealBrowserMFAResponse(t *testing.T, key, plaintext []byte) []byte {
+	t.Helper()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := json.Marshal(map[string]any{
+		"ciphertext": aead.Seal(nil, nonce, plaintext, nil),
+		"nonce":      nonce,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sealed
 }
 
 func assertTestSession(t *testing.T, request *http.Request) {

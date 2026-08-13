@@ -3,21 +3,23 @@ package com.naarang.telemob.teleport
 import android.Manifest
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.pm.PackageManager
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
-import androidx.credentials.CredentialManager
-import androidx.credentials.GetCredentialRequest
-import androidx.credentials.GetPublicKeyCredentialOption
-import androidx.credentials.PublicKeyCredential
+import expo.modules.interfaces.permissions.PermissionsResponseListener
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import teleportmobile.EventSink
+import kotlin.coroutines.resume
 
 class ExpoTeleportModule : Module() {
   private val core by lazy { TeleportCoreHolder.core }
-  private val passkeyRequests = mutableMapOf<String, String>()
+  private val browserMFARequests = mutableMapOf<String, String>()
   private val eventSink = object : EventSink {
     override fun onTerminalEvent(eventJSON: String) {
       val event = JSONObject(eventJSON)
@@ -41,7 +43,7 @@ class ExpoTeleportModule : Module() {
 
     OnDestroy {
       core.setEventSink(null)
-      passkeyRequests.clear()
+      browserMFARequests.clear()
     }
 
     AsyncFunction("getCapabilitiesAsync") {
@@ -66,14 +68,14 @@ class ExpoTeleportModule : Module() {
     AsyncFunction("logoutAsync") {
       core.logout()
       appContext.reactContext?.let(TerminalForegroundService::stop)
-      passkeyRequests.clear()
+      browserMFARequests.clear()
     }
 
     AsyncFunction("beginLoginAsync") { requestJSON: String ->
       core.beginLoginJSON(requestJSON).also { challengeJSON ->
         val challenge = JSONObject(challengeJSON)
         if (challenge.optString("kind") == "passkey") {
-          passkeyRequests[challenge.getString("challengeId")] = challenge.getString("requestJson")
+          browserMFARequests[challenge.getString("challengeId")] = challenge.getString("browserUrl")
         }
       }
     }
@@ -83,24 +85,20 @@ class ExpoTeleportModule : Module() {
     }
 
     AsyncFunction("finishPasskeyAsync") Coroutine { challengeID: String, credentialJSON: String ->
-      val assertionJSON = credentialJSON.ifBlank {
-        val requestJSON = passkeyRequests[challengeID]
-          ?: throw IllegalStateException("The passkey challenge is missing or expired.")
-        val activity = appContext.currentActivity
-          ?: throw IllegalStateException("The app must be visible to request a passkey.")
-        val credentialManager = CredentialManager.create(activity)
-        val response = credentialManager.getCredential(
-          context = activity,
-          request = GetCredentialRequest.Builder()
-            .addCredentialOption(GetPublicKeyCredentialOption(requestJSON))
-            .build()
-        )
-        val credential = response.credential as? PublicKeyCredential
-          ?: throw IllegalStateException("The selected credential is not a passkey.")
-        credential.authenticationResponseJson
+      if (credentialJSON.isNotBlank()) {
+        return@Coroutine core.finishPasskey(challengeID, credentialJSON)
       }
-      core.finishPasskey(challengeID, assertionJSON).also {
-        passkeyRequests.remove(challengeID)
+      val browserURL = browserMFARequests[challengeID]
+        ?: throw IllegalStateException("The Browser MFA challenge is missing or expired.")
+      val activity = appContext.currentActivity
+        ?: throw IllegalStateException("The app must be visible to open Browser MFA.")
+      withContext(Dispatchers.Main) {
+        activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(browserURL)))
+      }
+      try {
+        core.finishPasskey(challengeID, "")
+      } finally {
+        browserMFARequests.remove(challengeID)
       }
     }
 
@@ -108,20 +106,11 @@ class ExpoTeleportModule : Module() {
       core.listServersJSON()
     }
 
-    AsyncFunction("openSessionAsync") { targetJSON: String ->
+    AsyncFunction("openSessionAsync") Coroutine { targetJSON: String ->
+      awaitNotificationPermission()
       core.openSessionJSON(targetJSON).also { sessionJSON ->
         val session = JSONObject(sessionJSON)
         val target = JSONObject(targetJSON)
-        if (
-          Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-          && appContext.currentActivity?.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-          appContext.currentActivity?.requestPermissions(
-            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-            2402
-          )
-        }
         appContext.reactContext?.let { context ->
           TerminalForegroundService.start(
             context,
@@ -150,6 +139,26 @@ class ExpoTeleportModule : Module() {
 
     AsyncFunction("closeSessionAsync") { sessionID: String ->
       core.closeSession(sessionID)
+      appContext.reactContext?.let { context ->
+        TerminalForegroundService.release(context, sessionID)
+      }
+    }
+  }
+
+  private suspend fun awaitNotificationPermission() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+
+    val permissions = appContext.permissions
+      ?: throw IllegalStateException("The Android permissions service is unavailable.")
+    if (permissions.hasGrantedPermissions(Manifest.permission.POST_NOTIFICATIONS)) return
+
+    suspendCancellableCoroutine { continuation ->
+      permissions.askForPermissions(
+        PermissionsResponseListener {
+          if (continuation.isActive) continuation.resume(Unit)
+        },
+        Manifest.permission.POST_NOTIFICATIONS
+      )
     }
   }
 }

@@ -70,13 +70,18 @@ class TerminalForegroundService : Service() {
       )
     }
     val notification = notificationBuilder
-      .setSmallIcon(applicationInfo.icon)
+      .setSmallIcon(R.drawable.ic_telemob_terminal)
       .setContentTitle("Telemob terminal active")
       .setContentText(target.ifBlank { "SSH connection is running" })
       .setCategory(Notification.CATEGORY_SERVICE)
       .setOngoing(true)
       .setOnlyAlertOnce(true)
       .addAction(Notification.Action.Builder(null, "Disconnect", stopIntent).build())
+      .apply {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+          setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
+        }
+      }
       .apply { if (contentIntent != null) setContentIntent(contentIntent) }
       .build()
 

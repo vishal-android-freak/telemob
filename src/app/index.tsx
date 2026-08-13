@@ -12,7 +12,6 @@ import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import {
-  ConnectionRail,
   Eyebrow,
   Field,
   FieldLabel,
@@ -172,8 +171,6 @@ export default function ConnectScreen() {
             </View>
           </View>
 
-          <ConnectionRail step={1} />
-
           <View style={styles.hero}>
             <Eyebrow>Identity checkpoint</Eyebrow>
             <Text style={styles.title}>Your infrastructure, within reach.</Text>
@@ -219,7 +216,7 @@ export default function ConnectScreen() {
               <View style={styles.methodRow}>
                 <MethodButton
                   label="Passkey"
-                  detail="Face ID / device unlock"
+                  detail="Continue in your browser"
                   active={method === 'passkey'}
                   onPress={() => {
                     setMethod('passkey');

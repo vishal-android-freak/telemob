@@ -5,6 +5,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  type StyleProp,
   type TextInputProps,
   View,
   type ViewStyle,
@@ -108,7 +109,7 @@ export function Notice({ children, tone = 'quiet' }: PropsWithChildren<{ tone?: 
   );
 }
 
-export function Panel({ children, style }: PropsWithChildren<{ style?: ViewStyle }>) {
+export function Panel({ children, style }: PropsWithChildren<{ style?: StyleProp<ViewStyle> }>) {
   return <View style={[styles.panel, style]}>{children}</View>;
 }
 

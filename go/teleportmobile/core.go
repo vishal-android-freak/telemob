@@ -197,21 +197,10 @@ func (c *Core) BeginLoginJSON(requestJSON string) (string, error) {
 			"kind": "totp", "challengeId": id, "digits": 6,
 		})
 	}
-	host := request.ProxyAddress
-	if parsedHost, _, splitErr := net.SplitHostPort(request.ProxyAddress); splitErr == nil {
-		host = parsedHost
-	}
-	challenge, err := randomID("webauthn")
-	if err != nil {
-		return "", err
-	}
 	return marshal(map[string]any{
-		"kind":                 "passkey",
-		"challengeId":          id,
-		"rpId":                 strings.Trim(host, "[]"),
-		"challenge":            challenge,
-		"allowedCredentialIds": []string{},
-		"requestJson":          fmt.Sprintf(`{"challenge":%q,"rpId":%q,"allowCredentials":[]}`, challenge, strings.Trim(host, "[]")),
+		"kind":        "passkey",
+		"challengeId": id,
+		"browserUrl":  "https://" + strings.TrimSuffix(request.ProxyAddress, "/") + "/web/mfa/browser/development-request",
 	})
 }
 
@@ -230,16 +219,11 @@ func (c *Core) FinishTOTP(challengeID, code string) (string, error) {
 	return c.finishLogin(challengeID, "totp")
 }
 
-// FinishPasskey accepts the assertion returned by AuthenticationServices on
-// iOS or Credential Manager on Android. The production Teleport transport will
-// send the opaque assertion to the proxy for verification.
+// FinishPasskey waits for the encrypted assertion returned to the local
+// callback by Teleport's Browser MFA page.
 func (c *Core) FinishPasskey(challengeID, credentialJSON string) (string, error) {
 	if !c.development {
 		return c.web.finishPasskey(challengeID, credentialJSON)
-	}
-	var assertion map[string]any
-	if err := json.Unmarshal([]byte(credentialJSON), &assertion); err != nil || len(assertion) == 0 {
-		return "", errors.New("a platform passkey assertion is required")
 	}
 	return c.finishLogin(challengeID, "passkey")
 }

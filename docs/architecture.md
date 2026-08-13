@@ -22,15 +22,15 @@ Teleport proxy ──► SSH node
 - The Go core starts password authentication and coordinates Teleport's MFA
   challenge/response exchange. Passwords stay in memory and are never persisted.
 - TOTP is collected by the shared Expo UI and returned through the Go core.
-- Passkey prompts are necessarily platform-owned: AuthenticationServices on iOS
-  and Credential Manager on Android perform the ceremony. Both return the same
-  assertion JSON contract to Go, which completes the Teleport challenge.
+- Passkeys use Teleport Browser MFA. Go starts an encrypted loopback callback,
+  Android/iOS opens the proxy's Browser MFA page in the system browser, and the
+  proxy returns the browser-owned WebAuthn assertion to Go through that callback.
 - The resulting Teleport web session remains in the Go core's cookie jar and is
   exported as an encrypted SecureStore snapshot. It is restored on cold launch
   until Teleport expires it; passwords are never included.
-- Native passkeys require an OS-verified relationship between the app and the
-  proxy's WebAuthn RP domain. iOS uses Associated Domains/AASA; Android uses
-  Digital Asset Links. TOTP has no such deployment requirement.
+- Browser MFA supports proxy domains entered at runtime without Associated
+  Domains or Digital Asset Links. It requires Teleport 18.8+ and a browser that
+  trusts the proxy certificate. TOTP has no such deployment requirement.
 
 ## Current vertical slice
 
@@ -40,10 +40,9 @@ transport and defines the gomobile-safe API. Its integration tests exercise TLS
 login, CSRF protection, session cookies, node mapping, WebSocket authentication,
 and PTY byte streaming against an in-process proxy.
 
-The Kotlin bridge links the generated AAR and invokes Android Credential Manager.
-The Swift bridge links the generated XCFramework and invokes Authentication
-Services. Native builds choose this bridge by default; Expo web and Expo Go fall
-back to the deterministic driver.
+The Kotlin and Swift bridges link the generated Go artifacts and open the system
+browser for Browser MFA. Native builds choose this bridge by default; Expo web
+and Expo Go fall back to the deterministic driver.
 
 ## Terminal and background ownership
 
@@ -66,7 +65,7 @@ multiplexer, daemon, package, or configuration is required.
 The Go core uses Teleport's local-user web-session flow:
 
 1. `GET /webapi/ping` validates the proxy and discovers the cluster.
-2. MFA begin/finish endpoints complete password + TOTP or passkey login.
+2. MFA begin/finish endpoints complete password + TOTP or Browser MFA login.
 3. A short-lived bearer token and secure session cookie authorize node listing.
 4. The token is renewed before expiry while the web session remains valid.
 5. Terminal sessions use `/v1/webapi/sites/:cluster/connect/ws`, authenticate

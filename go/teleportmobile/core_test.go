@@ -60,7 +60,7 @@ func TestTOTPLoginAndShellLifecycle(t *testing.T) {
 	}
 }
 
-func TestPasskeyRequiresPlatformAssertion(t *testing.T) {
+func TestPasskeyUsesBrowserMFA(t *testing.T) {
 	core := NewDevelopmentCore()
 	challengeJSON, err := core.BeginLoginJSON(`{
 		"proxyAddress":"teleport.example.com:443",
@@ -73,14 +73,15 @@ func TestPasskeyRequiresPlatformAssertion(t *testing.T) {
 	}
 	var challenge struct {
 		ChallengeID string `json:"challengeId"`
+		BrowserURL  string `json:"browserUrl"`
 	}
 	if err := json.Unmarshal([]byte(challengeJSON), &challenge); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := core.FinishPasskey(challenge.ChallengeID, ""); err == nil {
-		t.Fatal("expected an empty passkey assertion to fail")
+	if !strings.Contains(challenge.BrowserURL, "/web/mfa/browser/") {
+		t.Fatalf("unexpected Browser MFA URL: %q", challenge.BrowserURL)
 	}
-	if _, err := core.FinishPasskey(challenge.ChallengeID, `{"id":"credential"}`); err != nil {
+	if _, err := core.FinishPasskey(challenge.ChallengeID, ""); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -3,6 +3,8 @@ package teleportmobile
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
@@ -10,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -24,6 +27,7 @@ import (
 const (
 	requestTimeout       = 20 * time.Second
 	websocketAuthTimeout = 20 * time.Second
+	browserMFATimeout    = 5 * time.Minute
 	maxResponseBytes     = 8 << 20
 	sessionCookieName    = "__Host-session"
 	csrfCookieName       = "__Host-grv_csrf"
@@ -48,6 +52,20 @@ type pendingWebLogin struct {
 	baseURL   *url.URL
 	ping      proxyPing
 	challenge mfaChallenge
+	browser   *browserMFACallback
+}
+
+type browserMFACallback struct {
+	server    *http.Server
+	listener  net.Listener
+	key       []byte
+	result    chan browserMFAResult
+	closeOnce sync.Once
+}
+
+type browserMFAResult struct {
+	credentialJSON string
+	err            error
 }
 
 type webSession struct {
@@ -97,6 +115,9 @@ type proxyPing struct {
 type mfaChallenge struct {
 	WebauthnChallenge json.RawMessage `json:"webauthn_challenge"`
 	TOTPChallenge     bool            `json:"totp_challenge"`
+	BrowserChallenge  *struct {
+		RequestID string `json:"requestId"`
+	} `json:"browser_challenge"`
 }
 
 type webSessionResponse struct {
@@ -175,17 +196,45 @@ func (w *webTransport) beginLogin(requestJSON string) (string, error) {
 		return "", fmt.Errorf("this first build supports local Teleport users; proxy authentication type is %q", ping.Auth.Type)
 	}
 
+	var browser *browserMFACallback
+	if request.Method == "passkey" {
+		browser, err = newBrowserMFACallback()
+		if err != nil {
+			return "", fmt.Errorf("start Browser MFA callback: %w", err)
+		}
+	}
+	keepBrowser := false
+	defer func() {
+		if browser != nil && !keepBrowser {
+			browser.close()
+		}
+	}()
+
 	var challenge mfaChallenge
-	if err := doJSON(context.Background(), client, baseURL, http.MethodPost, "/v1/webapi/mfa/login/begin", map[string]string{
+	beginRequest := map[string]string{
 		"user": request.Username,
 		"pass": request.Password,
-	}, "", "", &challenge); err != nil {
+	}
+	if browser != nil {
+		beginRequest["browser_mfa_tsh_redirect_url"] = browser.callbackURL()
+	}
+	if err := doJSON(context.Background(), client, baseURL, http.MethodPost, "/v1/webapi/mfa/login/begin", beginRequest, "", "", &challenge); err != nil {
 		return "", fmt.Errorf("begin Teleport login: %w", err)
+	}
+	if request.Method == "totp" && !challenge.TOTPChallenge {
+		return "", errors.New("this Teleport user does not have a TOTP challenge available")
+	}
+	if request.Method == "passkey" && (challenge.BrowserChallenge == nil || challenge.BrowserChallenge.RequestID == "") {
+		return "", errors.New("this Teleport proxy does not offer Browser MFA; passkey login requires Teleport 18.8 or newer with CLI browser authentication enabled")
 	}
 
 	challengeID, err := randomID("challenge")
 	if err != nil {
 		return "", err
+	}
+	if request.Method == "passkey" {
+		// Browser MFA no longer needs the password after the begin request.
+		request.Password = ""
 	}
 	pending := &pendingWebLogin{
 		request:   request,
@@ -193,54 +242,27 @@ func (w *webTransport) beginLogin(requestJSON string) (string, error) {
 		baseURL:   baseURL,
 		ping:      ping,
 		challenge: challenge,
+		browser:   browser,
 	}
 	w.mu.Lock()
 	w.pending[challengeID] = pending
 	w.mu.Unlock()
 
 	if request.Method == "totp" {
-		if !challenge.TOTPChallenge {
-			w.forgetChallenge(challengeID)
-			return "", errors.New("this Teleport user does not have a TOTP challenge available")
-		}
 		return marshal(map[string]any{
 			"kind": "totp", "challengeId": challengeID, "digits": 6,
 		})
 	}
 
-	if len(challenge.WebauthnChallenge) == 0 || bytes.Equal(challenge.WebauthnChallenge, []byte("null")) {
-		w.forgetChallenge(challengeID)
-		return "", errors.New("this Teleport user does not have a passkey challenge available")
-	}
-	var assertion struct {
-		PublicKey json.RawMessage `json:"publicKey"`
-	}
-	var publicKey struct {
-		Challenge        string `json:"challenge"`
-		RPID             string `json:"rpId"`
-		AllowCredentials []struct {
-			ID string `json:"id"`
-		} `json:"allowCredentials"`
-	}
-	if err := json.Unmarshal(challenge.WebauthnChallenge, &assertion); err != nil {
-		w.forgetChallenge(challengeID)
-		return "", fmt.Errorf("decode Teleport passkey challenge: %w", err)
-	}
-	if err := json.Unmarshal(assertion.PublicKey, &publicKey); err != nil {
-		w.forgetChallenge(challengeID)
-		return "", fmt.Errorf("decode Teleport public-key options: %w", err)
-	}
-	allowedIDs := make([]string, 0, len(publicKey.AllowCredentials))
-	for _, credential := range publicKey.AllowCredentials {
-		allowedIDs = append(allowedIDs, credential.ID)
-	}
+	browserURL := *baseURL
+	browserURL.Path = "/web/mfa/browser/" + url.PathEscape(challenge.BrowserChallenge.RequestID)
+	browserURL.RawQuery = ""
+	browserURL.Fragment = ""
+	keepBrowser = true
 	return marshal(map[string]any{
-		"kind":                 "passkey",
-		"challengeId":          challengeID,
-		"rpId":                 publicKey.RPID,
-		"challenge":            publicKey.Challenge,
-		"allowedCredentialIds": allowedIDs,
-		"requestJson":          string(assertion.PublicKey),
+		"kind":        "passkey",
+		"challengeId": challengeID,
+		"browserUrl":  browserURL.String(),
 	})
 }
 
@@ -283,9 +305,31 @@ func (w *webTransport) finishPasskey(challengeID, credentialJSON string) (string
 	if err != nil {
 		return "", err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			w.forgetChallenge(challengeID)
+		}
+	}()
+	if credentialJSON == "" {
+		if pending.browser == nil {
+			return "", errors.New("the Browser MFA callback is unavailable; start login again")
+		}
+		select {
+		case result := <-pending.browser.result:
+			if result.err != nil {
+				w.forgetChallenge(challengeID)
+				return "", result.err
+			}
+			credentialJSON = result.credentialJSON
+		case <-time.After(browserMFATimeout):
+			w.forgetChallenge(challengeID)
+			return "", errors.New("timed out waiting for Browser MFA; start login again")
+		}
+	}
 	var credential map[string]any
 	if err := json.Unmarshal([]byte(credentialJSON), &credential); err != nil || len(credential) == 0 {
-		return "", errors.New("a platform passkey assertion is required")
+		return "", errors.New("a browser passkey assertion is required")
 	}
 	// Apple and Android expose the WebAuthn extension results under this name.
 	// Teleport's assertion type expects the W3C JSON field `extensions`.
@@ -303,7 +347,12 @@ func (w *webTransport) finishPasskey(challengeID, credentialJSON string) (string
 	}, "", "", &response); err != nil {
 		return "", fmt.Errorf("complete passkey login: %w", err)
 	}
-	return w.commitLogin(challengeID, pending, response)
+	profile, err := w.commitLogin(challengeID, pending, response)
+	if err != nil {
+		return "", err
+	}
+	committed = true
+	return profile, nil
 }
 
 func (w *webTransport) commitLogin(challengeID string, pending *pendingWebLogin, response webSessionResponse) (string, error) {
@@ -338,6 +387,9 @@ func (w *webTransport) commitLogin(challengeID string, pending *pendingWebLogin,
 	pending.request.Password = ""
 	w.session = session
 	w.mu.Unlock()
+	if pending.browser != nil {
+		pending.browser.close()
+	}
 
 	profile := authenticatedProfile{
 		ProxyAddress: pending.request.ProxyAddress,
@@ -454,6 +506,9 @@ func (w *webTransport) logout() {
 	w.session = nil
 	for _, pending := range w.pending {
 		pending.request.Password = ""
+		if pending.browser != nil {
+			pending.browser.close()
+		}
 	}
 	w.pending = make(map[string]*pendingWebLogin)
 	terminals := w.terminals
@@ -744,11 +799,132 @@ func (w *webTransport) pendingLogin(challengeID, method string) (*pendingWebLogi
 
 func (w *webTransport) forgetChallenge(challengeID string) {
 	w.mu.Lock()
-	if pending := w.pending[challengeID]; pending != nil {
-		pending.request.Password = ""
-	}
+	pending := w.pending[challengeID]
 	delete(w.pending, challengeID)
 	w.mu.Unlock()
+	if pending == nil {
+		return
+	}
+	pending.request.Password = ""
+	if pending.browser != nil {
+		pending.browser.close()
+	}
+}
+
+func newBrowserMFACallback() (*browserMFACallback, error) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		return nil, fmt.Errorf("generate callback secret: %w", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	callback := &browserMFACallback{
+		listener: listener,
+		key:      key,
+		result:   make(chan browserMFAResult, 1),
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/callback", callback.handle)
+	callback.server = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: requestTimeout,
+		WriteTimeout:      requestTimeout,
+		IdleTimeout:       requestTimeout,
+	}
+	go func() {
+		if err := callback.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			callback.deliver(browserMFAResult{err: fmt.Errorf("Browser MFA callback failed: %w", err)})
+		}
+	}()
+	return callback, nil
+}
+
+func (b *browserMFACallback) callbackURL() string {
+	return (&url.URL{
+		Scheme:   "http",
+		Host:     b.listener.Addr().String(),
+		Path:     "/callback",
+		RawQuery: url.Values{"secret_key": {hex.EncodeToString(b.key)}}.Encode(),
+	}).String()
+}
+
+func (b *browserMFACallback) handle(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Access-Control-Allow-Origin", "*")
+	response.Header().Set("Cache-Control", "no-store")
+	if request.Method == http.MethodOptions {
+		response.WriteHeader(http.StatusOK)
+		return
+	}
+	if request.Method != http.MethodGet && request.Method != http.MethodPost {
+		response.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if err := request.ParseForm(); err != nil {
+		b.fail(response, fmt.Errorf("read Browser MFA callback: %w", err))
+		return
+	}
+	if callbackError := request.Form.Get("err"); callbackError != "" {
+		b.fail(response, fmt.Errorf("Browser MFA failed: %s", callbackError))
+		return
+	}
+	plaintext, err := openBrowserMFAResponse(b.key, []byte(request.Form.Get("response")))
+	if err != nil {
+		b.fail(response, fmt.Errorf("decrypt Browser MFA response: %w", err))
+		return
+	}
+	var loginResponse struct {
+		WebauthnResponse json.RawMessage `json:"browser_mfa_webauthn_response"`
+	}
+	if err := json.Unmarshal(plaintext, &loginResponse); err != nil || len(loginResponse.WebauthnResponse) == 0 || bytes.Equal(loginResponse.WebauthnResponse, []byte("null")) {
+		b.fail(response, errors.New("Teleport returned an invalid Browser MFA response"))
+		return
+	}
+	response.Header().Set("Content-Type", "text/html; charset=utf-8")
+	response.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(response, "<!doctype html><meta name=viewport content='width=device-width'><title>Telemob</title><body style='font-family:system-ui;padding:32px;background:#08111f;color:#eaf2ff'><h1>Authentication complete</h1><p>You can return to Telemob.</p></body>")
+	b.deliver(browserMFAResult{credentialJSON: string(loginResponse.WebauthnResponse)})
+}
+
+func (b *browserMFACallback) fail(response http.ResponseWriter, err error) {
+	http.Error(response, "Browser MFA failed. Return to Telemob and try again.", http.StatusBadRequest)
+	b.deliver(browserMFAResult{err: err})
+}
+
+func (b *browserMFACallback) deliver(result browserMFAResult) {
+	select {
+	case b.result <- result:
+	default:
+	}
+}
+
+func (b *browserMFACallback) close() {
+	b.closeOnce.Do(func() {
+		_ = b.server.Close()
+	})
+}
+
+func openBrowserMFAResponse(key, encrypted []byte) ([]byte, error) {
+	var sealed struct {
+		Ciphertext []byte `json:"ciphertext"`
+		Nonce      []byte `json:"nonce"`
+	}
+	if err := json.Unmarshal(encrypted, &sealed); err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if len(sealed.Nonce) != aead.NonceSize() {
+		return nil, errors.New("invalid Browser MFA nonce")
+	}
+	return aead.Open(nil, sealed.Nonce, sealed.Ciphertext, nil)
 }
 
 func (w *webTransport) terminal(sessionID string) (*webTerminal, error) {

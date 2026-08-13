@@ -4,10 +4,7 @@ export type AuthChallenge =
   | {
       kind: 'passkey';
       challengeId: string;
-      rpId: string;
-      challenge: string;
-      allowedCredentialIds: string[];
-      requestJson: string;
+      browserUrl: string;
     }
   | {
       kind: 'totp';
