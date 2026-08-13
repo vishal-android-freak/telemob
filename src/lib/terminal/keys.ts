@@ -1,0 +1,95 @@
+export type TerminalModifiers = {
+  ctrl: boolean;
+  alt: boolean;
+};
+
+export type TerminalKey = {
+  label: string;
+  key: string;
+  wide?: boolean;
+};
+
+export const TERMINAL_KEYS: TerminalKey[] = [
+  { label: '^C', key: 'interrupt' },
+  { label: 'ESC', key: 'escape' },
+  { label: 'TAB', key: 'tab' },
+  { label: '←', key: 'left' },
+  { label: '↑', key: 'up' },
+  { label: '↓', key: 'down' },
+  { label: '→', key: 'right' },
+  { label: 'HOME', key: 'home', wide: true },
+  { label: 'END', key: 'end' },
+  { label: 'PG↑', key: 'pageup' },
+  { label: 'PG↓', key: 'pagedown' },
+  { label: 'INS', key: 'insert' },
+  { label: 'DEL', key: 'delete' },
+  { label: 'BKSP', key: 'backspace', wide: true },
+  ...Array.from({ length: 12 }, (_, index) => ({
+    label: `F${index + 1}`,
+    key: `f${index + 1}`,
+  })),
+];
+
+const BASIC_SEQUENCES: Record<string, string> = {
+  interrupt: '\u0003',
+  escape: '\u001b',
+  tab: '\t',
+  backspace: '\u007f',
+  insert: '\u001b[2~',
+  delete: '\u001b[3~',
+  pageup: '\u001b[5~',
+  pagedown: '\u001b[6~',
+  f5: '\u001b[15~',
+  f6: '\u001b[17~',
+  f7: '\u001b[18~',
+  f8: '\u001b[19~',
+  f9: '\u001b[20~',
+  f10: '\u001b[21~',
+  f11: '\u001b[23~',
+  f12: '\u001b[24~',
+};
+
+const CSI_FINAL: Record<string, string> = {
+  up: 'A',
+  down: 'B',
+  right: 'C',
+  left: 'D',
+  home: 'H',
+  end: 'F',
+  f1: 'P',
+  f2: 'Q',
+  f3: 'R',
+  f4: 'S',
+};
+
+export function terminalKeySequence(key: string, modifiers: TerminalModifiers) {
+  const modifier = 1 + (modifiers.alt ? 2 : 0) + (modifiers.ctrl ? 4 : 0);
+  const final = CSI_FINAL[key];
+  if (final) {
+    if (modifier === 1) {
+      return key.startsWith('f') ? `\u001bO${final}` : `\u001b[${final}`;
+    }
+    return `\u001b[1;${modifier}${final}`;
+  }
+
+  let sequence = BASIC_SEQUENCES[key] ?? '';
+  if (!sequence) return sequence;
+  if (modifier !== 1 && /\u001b\[\d+~/.test(sequence)) {
+    sequence = sequence.replace('~', `;${modifier}~`);
+    return sequence;
+  }
+  return modifiers.alt && key !== 'escape' ? `\u001b${sequence}` : sequence;
+}
+
+export function terminalTextSequence(text: string, modifiers: TerminalModifiers) {
+  if (!text) return '';
+  let sequence = text;
+  if (modifiers.ctrl) {
+    const first = text[0];
+    const code = first.toUpperCase().charCodeAt(0);
+    if (code >= 64 && code <= 95) {
+      sequence = String.fromCharCode(code & 0x1f) + text.slice(1);
+    }
+  }
+  return modifiers.alt ? `\u001b${sequence}` : sequence;
+}
