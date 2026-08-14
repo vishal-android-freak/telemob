@@ -20,10 +20,6 @@
         "image": "sdk-57"
       }
     },
-    "beta": {
-      "extends": "preview",
-      "autoIncrement": true
-    },
     "production": {
       "autoIncrement": true,
       "android": {
@@ -32,9 +28,19 @@
       "ios": {
         "image": "sdk-57"
       }
+    },
+    "beta": {
+      "extends": "production",
+      "autoIncrement": true
     }
   },
   "submit": {
+    "play-beta": {
+      "android": {
+        "track": "beta",
+        "releaseStatus": "completed"
+      }
+    },
     "production": {}
   }
 }

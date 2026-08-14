@@ -23,14 +23,35 @@ and iOS `buildNumber` on each build.
 | Tag | EAS profile | Android | iOS |
 | --- | --- | --- | --- |
 | `v1.X.Y` | `production` | Store-signed AAB | App Store archive |
-| `v1.X.Y-beta.N` | `beta` | Installable internal APK | Ad hoc IPA for registered devices |
+| `v1.X.Y-beta.N` | `beta` | Store-signed AAB; submitted to Play Open testing | App Store archive (build only) |
 
 The workflow waits for both platform builds. A failed Android or iOS archive
 fails the GitHub Actions run. The EAS JSON results are uploaded as a workflow
-artifact and the EAS build links are added to the job summary.
+artifact and the EAS build links are added to the job summary. For beta tags,
+the completed Android build is then submitted to Google Play's `beta` track,
+which is the Open testing track.
 
-Tagging creates builds; it does not automatically submit them to Google Play or
-App Store Connect and does not publish a GitHub Release.
+Stable tags create builds without submitting them. Beta tags submit Android to
+Google Play Open testing, but do not submit iOS to App Store Connect and do not
+publish a GitHub Release.
+
+## Store review demo
+
+Signed native builds contain an offline, deterministic review flow. It is
+activated only when all of these values are entered exactly:
+
+- Proxy: `demo.telemob.invalid`
+- Username: `play-review`
+- Password: `telemob-demo`
+- Second factor: `TOTP`
+- Authenticator code: `123456`
+
+These are identifiers for local demo content, not credentials for an external
+service. They are intercepted before any network request is made. Every other
+login continues through the real Teleport transport. The demo session uses the
+same native terminal bridge and Android foreground service as a real session so
+store reviewers can verify background retention, notification permission, and
+the notification Disconnect action.
 
 ## Maintainer setup
 
@@ -38,11 +59,16 @@ App Store Connect and does not publish a GitHub Release.
    `expo.extra.eas.projectId` in `app.json`.
 2. Configure Android and iOS signing credentials once with interactive EAS
    builds for both the `production` and `beta` profiles.
-3. Register iOS beta test devices with `eas device:create`, then regenerate the
-   ad hoc profile when the device list changes.
-4. Create an Expo personal access token and add it to the GitHub repository as
+3. Create an Expo personal access token and add it to the GitHub repository as
    the `EXPO_TOKEN` Actions secret.
-5. Protect release tags and limit who can create them.
+4. Create a Google service account with access to the Google Play Android
+   Developer API. In Play Console, grant it access to Telemob with the `View app
+   information` and `Release apps to testing tracks` permissions.
+5. Upload the service-account JSON key to the EAS project's Android credentials
+   for `com.naarang.telemob`. Do not commit the key or add it to GitHub Actions.
+6. Configure the Play Console Open testing track, including countries, tester
+   access, and a feedback address.
+7. Protect release tags and limit who can create them.
 
 EAS cloud builds require network access and may consume plan build credits.
 Signing credentials remain managed by EAS; they are not committed to Git.
@@ -64,14 +90,16 @@ git tag -a v1.2.3-beta.0 -m "Telemob v1.2.3 beta 0"
 git push origin v1.2.3-beta.0
 ```
 
-Follow the `Mobile release` workflow in GitHub Actions and open its EAS links to
-download or submit the resulting artifacts.
+Follow the `Mobile release` workflow in GitHub Actions. A beta tag builds both
+platforms and automatically submits the Android AAB to Play Open testing. Open
+the workflow's EAS links to inspect the builds and submission result.
 
 ## Forks
 
 Fork maintainers must replace the upstream EAS owner/project ID and usually the
 Android package and iOS bundle identifier. They must also configure their own
-Expo token, signing credentials, Apple team, and registered beta devices.
+Expo token, signing credentials, Apple team, Google Play app, and Google service
+account key in EAS.
 
 Secrets are intentionally unavailable to pull requests from forks, and ordinary
 branches never start signed release builds.

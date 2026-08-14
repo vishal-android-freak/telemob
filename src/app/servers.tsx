@@ -143,6 +143,11 @@ export default function ServersScreen() {
           Choose the node for login
         </Text>
 
+        {profile?.proxyAddress === 'demo.telemob.invalid'
+          && profile.username === 'play-review' ? (
+            <Notice>Offline store-review demo active. No external proxy is connected.</Notice>
+          ) : null}
+
         <Field
           accessibilityLabel="Filter servers"
           value={query}

@@ -116,3 +116,52 @@ jobs:
           path: eas-builds.json
           if-no-files-found: error
           retention-days: 90
+
+      - name: Select Android beta build
+        if: steps.release.outputs.prerelease == 'true'
+        id: android-build
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from 'node:fs';
+
+          const parsed = JSON.parse(readFileSync('eas-builds.json', 'utf8'));
+          const builds = Array.isArray(parsed) ? parsed : [parsed];
+          const android = builds.find(
+            build => String(build.platform).toLowerCase() === 'android'
+          );
+
+          if (!android?.id) {
+            throw new Error('The completed EAS builds did not include Android.');
+          }
+
+          appendFileSync(process.env.GITHUB_OUTPUT, `id=${android.id}\n`);
+          NODE
+
+      - name: Submit Android beta to Google Play Open testing
+        if: steps.release.outputs.prerelease == 'true'
+        run: |
+          eas submit \
+            --platform android \
+            --profile play-beta \
+            --id "${{ steps.android-build.outputs.id }}" \
+            --non-interactive \
+            --wait
+
+      - name: Add Play submission to job summary
+        if: steps.release.outputs.prerelease == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from 'node:fs';
+
+          appendFileSync(
+            process.env.GITHUB_STEP_SUMMARY,
+            [
+              '## Google Play Open testing',
+              '',
+              `Telemob ${process.env.RELEASE_TAG} was submitted to the Play beta track.`,
+              '',
+            ].join('\n')
+          );
+          NODE

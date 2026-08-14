@@ -26,9 +26,11 @@ type Core struct {
 	sink        EventSink
 	web         *webTransport
 	development bool
+	reviewer    bool
 	challenges  map[string]loginRequest
 	profile     *authenticatedProfile
 	sessions    map[string]sessionTarget
+	inputs      map[string]string
 	outputs     map[string]*sessionOutputRecord
 	outputOrder []string
 }
@@ -36,6 +38,12 @@ type Core struct {
 const (
 	maxSessionOutputBytes   = 1 << 20
 	maxSessionOutputRecords = 8
+	// These public, non-secret values activate local deterministic content for
+	// store review. They must never authenticate against an external service.
+	reviewerProxyAddress = "demo.telemob.invalid"
+	reviewerUsername     = "play-review"
+	reviewerPassword     = "telemob-demo"
+	reviewerTOTP         = "123456"
 )
 
 type sessionOutputChunk struct {
@@ -81,6 +89,7 @@ func NewCore() *Core {
 		web:        newWebTransport(false),
 		challenges: make(map[string]loginRequest),
 		sessions:   make(map[string]sessionTarget),
+		inputs:     make(map[string]string),
 		outputs:    make(map[string]*sessionOutputRecord),
 	}
 	c.web.emit = c.emit
@@ -94,6 +103,7 @@ func NewDevelopmentCore() *Core {
 		development: true,
 		challenges:  make(map[string]loginRequest),
 		sessions:    make(map[string]sessionTarget),
+		inputs:      make(map[string]string),
 		outputs:     make(map[string]*sessionOutputRecord),
 	}
 }
@@ -105,14 +115,14 @@ func (c *Core) SetEventSink(sink EventSink) {
 }
 
 func (c *Core) CapabilitiesJSON() string {
-	if c.development {
+	if c.usesDevelopmentTransport() {
 		return `{"nativeCoreLinked":true,"passkey":true,"totp":true,"developmentDriver":true}`
 	}
 	return `{"nativeCoreLinked":true,"passkey":true,"totp":true,"developmentDriver":false}`
 }
 
 func (c *Core) ExportSessionJSON() (string, error) {
-	if !c.development {
+	if !c.usesDevelopmentTransport() {
 		return c.web.exportSession()
 	}
 	c.mu.Lock()
@@ -120,25 +130,50 @@ func (c *Core) ExportSessionJSON() (string, error) {
 	if c.profile == nil {
 		return "", errors.New("there is no Teleport login to save")
 	}
-	return marshal(map[string]any{"version": 1, "development": true, "profile": c.profile})
+	snapshot := map[string]any{"version": 1, "development": true, "profile": c.profile}
+	if c.reviewer {
+		snapshot["reviewer"] = true
+	}
+	return marshal(snapshot)
 }
 
 func (c *Core) RestoreSessionJSON(snapshotJSON string) (string, error) {
 	if !c.development {
-		return c.web.restoreSession(snapshotJSON)
+		var mode struct {
+			Reviewer bool `json:"reviewer"`
+		}
+		if err := json.Unmarshal([]byte(snapshotJSON), &mode); err != nil || !mode.Reviewer {
+			c.setReviewerMode(false)
+			return c.web.restoreSession(snapshotJSON)
+		}
+		c.setReviewerMode(true)
 	}
 	var snapshot struct {
 		Version     int                   `json:"version"`
 		Development bool                  `json:"development"`
+		Reviewer    bool                  `json:"reviewer"`
 		Profile     *authenticatedProfile `json:"profile"`
 	}
 	if err := json.Unmarshal([]byte(snapshotJSON), &snapshot); err != nil {
+		if !c.development {
+			c.setReviewerMode(false)
+		}
 		return "", fmt.Errorf("decode saved development login: %w", err)
 	}
 	if snapshot.Version != 1 || !snapshot.Development || snapshot.Profile == nil {
+		if !c.development {
+			c.setReviewerMode(false)
+		}
 		return "", errors.New("the saved development login is invalid")
 	}
+	if !c.development && !snapshot.Reviewer {
+		c.setReviewerMode(false)
+		return "", errors.New("the saved reviewer login is invalid")
+	}
 	if expires, err := time.Parse(time.RFC3339, snapshot.Profile.ValidUntil); err != nil || time.Now().After(expires) {
+		if !c.development {
+			c.setReviewerMode(false)
+		}
 		return "", errors.New("the saved development login has expired")
 	}
 	c.mu.Lock()
@@ -148,7 +183,7 @@ func (c *Core) RestoreSessionJSON(snapshotJSON string) (string, error) {
 }
 
 func (c *Core) Logout() {
-	if !c.development {
+	if !c.usesDevelopmentTransport() {
 		c.web.logout()
 		c.mu.Lock()
 		c.outputs = make(map[string]*sessionOutputRecord)
@@ -160,23 +195,31 @@ func (c *Core) Logout() {
 	c.profile = nil
 	c.challenges = make(map[string]loginRequest)
 	c.sessions = make(map[string]sessionTarget)
+	c.inputs = make(map[string]string)
 	c.outputs = make(map[string]*sessionOutputRecord)
 	c.outputOrder = nil
+	if !c.development {
+		c.reviewer = false
+	}
 	c.mu.Unlock()
 }
 
 // BeginLoginJSON creates the same challenge contract that the real Teleport
 // adapter will populate from the proxy's SSH login challenge.
 func (c *Core) BeginLoginJSON(requestJSON string) (string, error) {
-	if !c.development {
-		return c.web.beginLogin(requestJSON)
-	}
 	var request loginRequest
 	if err := json.Unmarshal([]byte(requestJSON), &request); err != nil {
 		return "", fmt.Errorf("decode login request: %w", err)
 	}
 	request.ProxyAddress = strings.TrimSpace(request.ProxyAddress)
 	request.Username = strings.TrimSpace(request.Username)
+	if !c.development {
+		if !isReviewerLogin(request) {
+			c.setReviewerMode(false)
+			return c.web.beginLogin(requestJSON)
+		}
+		c.setReviewerMode(true)
+	}
 	if request.ProxyAddress == "" || request.Username == "" || request.Password == "" {
 		return "", errors.New("proxy address, username, and password are required")
 	}
@@ -205,8 +248,11 @@ func (c *Core) BeginLoginJSON(requestJSON string) (string, error) {
 }
 
 func (c *Core) FinishTOTP(challengeID, code string) (string, error) {
-	if !c.development {
+	if !c.usesDevelopmentTransport() {
 		return c.web.finishTOTP(challengeID, code)
+	}
+	if c.isReviewerMode() && code != reviewerTOTP {
+		return "", errors.New("the reviewer authenticator code is incorrect")
 	}
 	if len(code) != 6 {
 		return "", errors.New("enter the six-digit authenticator code")
@@ -222,14 +268,14 @@ func (c *Core) FinishTOTP(challengeID, code string) (string, error) {
 // FinishPasskey waits for the encrypted assertion returned to the local
 // callback by Teleport's Browser MFA page.
 func (c *Core) FinishPasskey(challengeID, credentialJSON string) (string, error) {
-	if !c.development {
+	if !c.usesDevelopmentTransport() {
 		return c.web.finishPasskey(challengeID, credentialJSON)
 	}
 	return c.finishLogin(challengeID, "passkey")
 }
 
 func (c *Core) ListServersJSON() (string, error) {
-	if !c.development {
+	if !c.usesDevelopmentTransport() {
 		return c.web.listServers()
 	}
 	if err := c.requireProfile(); err != nil {
@@ -250,7 +296,7 @@ func (c *Core) ListServersJSON() (string, error) {
 }
 
 func (c *Core) OpenSessionJSON(targetJSON string) (string, error) {
-	if !c.development {
+	if !c.usesDevelopmentTransport() {
 		result, err := c.web.openSession(targetJSON)
 		if err != nil {
 			return "", err
@@ -280,6 +326,7 @@ func (c *Core) OpenSessionJSON(targetJSON string) (string, error) {
 	}
 	c.mu.Lock()
 	c.sessions[id] = target
+	c.inputs[id] = ""
 	c.mu.Unlock()
 	c.prepareSessionOutput(id)
 
@@ -295,42 +342,100 @@ func (c *Core) OpenSessionJSON(targetJSON string) (string, error) {
 }
 
 func (c *Core) WriteSession(sessionID, data string) error {
-	if !c.development {
+	if !c.usesDevelopmentTransport() {
 		return c.web.writeSession(sessionID, data)
 	}
 	c.mu.Lock()
 	target, ok := c.sessions[sessionID]
-	c.mu.Unlock()
 	if !ok {
+		c.mu.Unlock()
 		return errors.New("session is not open")
 	}
-	command := strings.TrimSpace(data)
-	response := "development driver: " + command
-	switch command {
-	case "hostname":
-		response = target.Hostname
-	case "whoami":
-		response = target.Login
-	case "pwd":
-		response = "/home/" + target.Login
-	case "":
-		response = ""
+	nextInput, output, closeSession := developmentTerminalResponse(c.inputs[sessionID], target, data)
+	if closeSession {
+		delete(c.sessions, sessionID)
+		delete(c.inputs, sessionID)
+	} else {
+		c.inputs[sessionID] = nextInput
 	}
-	c.emit(map[string]any{
-		"type": "data", "sessionId": sessionID,
-		"data": normalizeTerminalNewlines(data) + response + "\r\n$ ",
-	})
+	c.mu.Unlock()
+	if output != "" {
+		c.emit(map[string]any{"type": "data", "sessionId": sessionID, "data": output})
+	}
+	if closeSession {
+		c.emit(map[string]any{"type": "closed", "sessionId": sessionID, "reason": "Remote session closed"})
+	}
 	return nil
 }
 
-func normalizeTerminalNewlines(value string) string {
-	value = strings.ReplaceAll(value, "\r\n", "\n")
-	value = strings.ReplaceAll(value, "\r", "\n")
-	return strings.ReplaceAll(value, "\n", "\r\n")
+func developmentTerminalResponse(input string, target sessionTarget, data string) (string, string, bool) {
+	data = strings.ReplaceAll(data, "\x1b[200~", "")
+	data = strings.ReplaceAll(data, "\x1b[201~", "")
+	output := strings.Builder{}
+	closeSession := false
+	previousWasCarriageReturn := false
+
+	for _, character := range data {
+		if character == '\n' && previousWasCarriageReturn {
+			previousWasCarriageReturn = false
+			continue
+		}
+		previousWasCarriageReturn = character == '\r'
+		switch character {
+		case '\r', '\n':
+			command := strings.TrimSpace(input)
+			output.WriteString("\r\n")
+			if command == "exit" || command == "logout" {
+				output.WriteString("logout\r\n")
+				input = ""
+				closeSession = true
+				break
+			}
+			if response := developmentCommand(command, target); response != "" {
+				output.WriteString(response)
+				output.WriteString("\r\n")
+			}
+			output.WriteString("$ ")
+			input = ""
+		case '\x03':
+			input = ""
+			output.WriteString("^C\r\n$ ")
+		case '\x7f', '\b':
+			characters := []rune(input)
+			if len(characters) > 0 {
+				input = string(characters[:len(characters)-1])
+				output.WriteString("\b \b")
+			}
+		case '\x1b':
+			// Ignore standalone escape input in the deterministic shell.
+		default:
+			input += string(character)
+			output.WriteRune(character)
+		}
+		if closeSession {
+			break
+		}
+	}
+	return input, output.String(), closeSession
+}
+
+func developmentCommand(command string, target sessionTarget) string {
+	switch command {
+	case "hostname":
+		return target.Hostname
+	case "whoami":
+		return target.Login
+	case "pwd":
+		return "/home/" + target.Login
+	case "clear", "":
+		return ""
+	default:
+		return "development driver: " + command
+	}
 }
 
 func (c *Core) ResizeSession(sessionID string, columns, rows int) error {
-	if !c.development {
+	if !c.usesDevelopmentTransport() {
 		return c.web.resizeSession(sessionID, columns, rows)
 	}
 	if columns < 1 || rows < 1 {
@@ -351,7 +456,7 @@ func (c *Core) ResizeSession(sessionID string, columns, rows int) error {
 // WebSocket. A successful write alone cannot prove that a connection survived
 // a network or app-state transition.
 func (c *Core) PingSession(sessionID string) error {
-	if !c.development {
+	if !c.usesDevelopmentTransport() {
 		return c.web.pingSession(sessionID)
 	}
 	c.mu.Lock()
@@ -397,14 +502,49 @@ func (c *Core) SessionOutputJSON(sessionID string, afterSequence int64) (string,
 }
 
 func (c *Core) CloseSession(sessionID string) {
-	if !c.development {
+	if !c.usesDevelopmentTransport() {
 		c.web.closeSession(sessionID)
 		return
 	}
 	c.mu.Lock()
 	delete(c.sessions, sessionID)
+	delete(c.inputs, sessionID)
 	c.mu.Unlock()
 	c.emit(map[string]any{"type": "closed", "sessionId": sessionID, "reason": "Closed on device"})
+}
+
+func isReviewerLogin(request loginRequest) bool {
+	return request.ProxyAddress == reviewerProxyAddress &&
+		request.Username == reviewerUsername &&
+		request.Password == reviewerPassword &&
+		request.Method == "totp"
+}
+
+func (c *Core) usesDevelopmentTransport() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.development || c.reviewer
+}
+
+func (c *Core) isReviewerMode() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reviewer
+}
+
+func (c *Core) setReviewerMode(enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.development || c.reviewer == enabled {
+		return
+	}
+	c.reviewer = enabled
+	c.profile = nil
+	c.challenges = make(map[string]loginRequest)
+	c.sessions = make(map[string]sessionTarget)
+	c.inputs = make(map[string]string)
+	c.outputs = make(map[string]*sessionOutputRecord)
+	c.outputOrder = nil
 }
 
 func (c *Core) finishLogin(challengeID, method string) (string, error) {
