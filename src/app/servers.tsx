@@ -61,21 +61,31 @@ export default function ServersScreen() {
           router.replace('/');
           return;
         }
+        const client = getTeleportClient();
+        let resolvedProfile = nextProfile;
+        let nextServers: TeleportServer[];
         try {
-          await getTeleportClient().restoreSession(snapshot);
-        } catch {
-          await clearProfile();
-          router.replace('/');
-          return;
+          nextServers = await client.listServers();
+        } catch (currentSessionError) {
+          if (!isMissingInMemorySession(currentSessionError)) {
+            throw currentSessionError;
+          }
+          try {
+            resolvedProfile = await client.restoreSession(snapshot);
+          } catch {
+            await clearProfile();
+            router.replace('/');
+            return;
+          }
+          nextServers = await client.listServers();
         }
-        const nextServers = await getTeleportClient().listServers();
-        const refreshedSnapshot = await getTeleportClient().exportSession();
+        const refreshedSnapshot = await client.exportSession();
         await saveSessionSnapshot(refreshedSnapshot);
         if (!active) return;
-        setProfile(nextProfile);
+        setProfile(resolvedProfile);
         setServers(Array.isArray(nextServers) ? nextServers : []);
       } catch (loadError) {
-        if (isForbidden(loadError)) {
+        if (isRejectedSession(loadError)) {
           await Promise.all([clearProfile(), getTeleportClient().logout()]);
           if (active) {
             router.replace({
@@ -264,8 +274,14 @@ function messageFrom(error: unknown) {
   return error instanceof Error ? error.message : 'Could not load servers.';
 }
 
-function isForbidden(error: unknown) {
-  return /\bHTTP 403\b/i.test(messageFrom(error));
+function isMissingInMemorySession(error: unknown) {
+  return /authenticate before requesting Teleport resources/i.test(messageFrom(error));
+}
+
+function isRejectedSession(error: unknown) {
+  return /\bHTTP 403\b|Teleport login has expired; authenticate again/i.test(
+    messageFrom(error)
+  );
 }
 
 function isActiveTerminalState(state: TerminalConnectionState) {

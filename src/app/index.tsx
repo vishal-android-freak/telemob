@@ -91,7 +91,8 @@ export default function ConnectScreen() {
 
   async function persistLogin(profile: AuthenticatedProfile) {
     const snapshot = await getTeleportClient().exportSession();
-    await Promise.all([saveProfile(profile), saveSessionSnapshot(snapshot)]);
+    await saveProfile(profile);
+    await saveSessionSnapshot(snapshot);
   }
 
   async function beginLogin() {

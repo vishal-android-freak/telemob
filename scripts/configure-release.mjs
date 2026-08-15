@@ -18,6 +18,8 @@ const version = match[1];
 const npmVersion = tag.slice(1);
 const prerelease = Boolean(match[2]);
 const profile = prerelease ? 'beta' : 'production';
+const androidProfile = profile;
+const iosProfile = profile;
 const root = resolve(import.meta.dirname, '..');
 
 if (shouldWrite) {
@@ -33,7 +35,15 @@ if (shouldWrite) {
   });
 }
 
-const metadata = { tag, version, npmVersion, prerelease, profile };
+const metadata = {
+  tag,
+  version,
+  npmVersion,
+  prerelease,
+  profile,
+  androidProfile,
+  iosProfile,
+};
 
 if (process.env.GITHUB_OUTPUT) {
   appendFileSync(
@@ -44,6 +54,8 @@ if (process.env.GITHUB_OUTPUT) {
       `npm_version=${npmVersion}`,
       `prerelease=${prerelease}`,
       `profile=${profile}`,
+      `android_profile=${androidProfile}`,
+      `ios_profile=${iosProfile}`,
       '',
     ].join('\n')
   );

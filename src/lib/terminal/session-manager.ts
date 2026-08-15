@@ -2,6 +2,7 @@ import type { Terminal as HeadlessTerminal } from '@xterm/headless';
 import { AppState, type AppStateStatus } from 'react-native';
 
 import { getTeleportClient, type TeleportClient } from '@/lib/teleport/client';
+import { saveSessionSnapshot } from '@/lib/teleport/profile-store';
 import { createTerminal } from '@/lib/terminal/runtime';
 import { terminalMouseScrollSequence, terminalMouseTapSequence } from '@/lib/terminal/keys';
 import { snapshotTerminal, type TerminalLine } from '@/lib/terminal/snapshot';
@@ -171,7 +172,11 @@ class TerminalSessionManager {
     this.state = 'closed';
     this.error = '';
     this.publish();
-    if (sessionId) await this.client.closeSession(sessionId);
+    try {
+      if (sessionId) await this.client.closeSession(sessionId);
+    } finally {
+      await this.persistSessionSnapshot();
+    }
   }
 
   private async connect(mode: 'initial' | 'resume') {
@@ -190,6 +195,7 @@ class TerminalSessionManager {
     try {
       const target = { ...this.target, ...this.size };
       const session = await this.client.openSession(target);
+      void this.persistSessionSnapshot();
       if (
         attempt !== this.connectionAttempt
         || !isAppActive(AppState.currentState)
@@ -347,6 +353,15 @@ class TerminalSessionManager {
   private setError(error: string) {
     this.error = error;
     this.publish();
+  }
+
+  private async persistSessionSnapshot() {
+    try {
+      await saveSessionSnapshot(await this.client.exportSession());
+    } catch {
+      // Terminal teardown must not become a logout path. Resource screens
+      // surface a genuinely expired or rejected Teleport session.
+    }
   }
 
   private publish() {

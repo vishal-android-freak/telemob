@@ -52,10 +52,10 @@ func TestExportSessionRenewsAndPersistsRotatedCredentials(t *testing.T) {
 		}
 		http.SetCookie(response, &http.Cookie{Name: sessionCookieName, Value: "new-cookie", Path: "/", Secure: true})
 		writeTestJSON(t, response, map[string]any{
-			"type":           "bearer",
-			"token":          "new-token",
-			"expires_in":     300,
-			"sessionExpires": time.Now().Add(time.Hour).UTC(),
+			"type":             "bearer",
+			"token":            "new-token",
+			"expires_in":       300,
+			"sessionExpiresIn": int((12 * time.Hour) / time.Second),
 		})
 	})
 	server := httptest.NewTLSServer(mux)
@@ -94,6 +94,91 @@ func TestExportSessionRenewsAndPersistsRotatedCredentials(t *testing.T) {
 	}
 	if snapshot.Token != "new-token" || snapshot.SessionCookie != "new-cookie" {
 		t.Fatalf("renewed credentials were not persisted: %#v", snapshot)
+	}
+	if time.Until(snapshot.ExpiresAt) < 11*time.Hour {
+		t.Fatalf("renewed session expiry = %v, want the cluster's 12-hour lifetime", snapshot.ExpiresAt)
+	}
+}
+
+func TestRestoreSessionDoesNotDowngradeLiveCredentials(t *testing.T) {
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+
+	baseURL, err := normalizeProxyURL(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	tests := []struct {
+		name               string
+		snapshotTokenUntil time.Time
+		wantToken          string
+		wantCookie         string
+	}{
+		{
+			name:               "older snapshot is ignored",
+			snapshotTokenUntil: now.Add(5 * time.Minute),
+			wantToken:          "live-token",
+			wantCookie:         "live-cookie",
+		},
+		{
+			name:               "newer snapshot is restored",
+			snapshotTokenUntil: now.Add(15 * time.Minute),
+			wantToken:          "saved-token",
+			wantCookie:         "saved-cookie",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, err := newWebHTTPClient(true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.Jar.SetCookies(baseURL, []*http.Cookie{{
+				Name: sessionCookieName, Value: "live-cookie", Path: "/", Secure: true,
+			}})
+			transport := newWebTransport(false)
+			transport.session = &webSession{
+				client:         client,
+				baseURL:        baseURL,
+				insecure:       true,
+				token:          "live-token",
+				tokenExpiresAt: now.Add(10 * time.Minute),
+				expiresAt:      now.Add(12 * time.Hour),
+				username:       "alice",
+				cluster:        "example.test",
+			}
+			snapshotJSON, err := marshal(persistedWebSession{
+				Version:        1,
+				ProxyAddress:   baseURL.String(),
+				SessionCookie:  "saved-cookie",
+				Token:          "saved-token",
+				TokenExpiresAt: test.snapshotTokenUntil,
+				ExpiresAt:      now.Add(12 * time.Hour),
+				Username:       "alice",
+				Cluster:        "example.test",
+				Insecure:       true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := transport.restoreSession(snapshotJSON); err != nil {
+				t.Fatalf("restoreSession() error = %v", err)
+			}
+			exportedJSON, err := transport.exportSession()
+			if err != nil {
+				t.Fatalf("exportSession() error = %v", err)
+			}
+			var exported persistedWebSession
+			if err := json.Unmarshal([]byte(exportedJSON), &exported); err != nil {
+				t.Fatal(err)
+			}
+			if exported.Token != test.wantToken || exported.SessionCookie != test.wantCookie {
+				t.Fatalf("restored credentials = token %q, cookie %q; want token %q, cookie %q", exported.Token, exported.SessionCookie, test.wantToken, test.wantCookie)
+			}
+		})
 	}
 }
 

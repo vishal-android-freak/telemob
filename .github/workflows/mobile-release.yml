@@ -63,19 +63,55 @@ jobs:
           packager: npm
           token: ${{ secrets.EXPO_TOKEN }}
 
-      - name: Build both mobile platforms on EAS
+      - name: Build Android on EAS
         run: |
           eas build \
-            --platform all \
-            --profile "${{ steps.release.outputs.profile }}" \
+            --platform android \
+            --profile "${{ steps.release.outputs.android_profile }}" \
             --non-interactive \
             --wait \
-            --json > eas-builds.json
+            --json > eas-build-android.json
+
+      - name: Build and submit iOS beta on EAS
+        if: steps.release.outputs.prerelease == 'true'
+        run: |
+          eas build \
+            --platform ios \
+            --profile "${{ steps.release.outputs.ios_profile }}" \
+            --auto-submit-with-profile testflight \
+            --non-interactive \
+            --wait \
+            --json > eas-build-ios.json
+
+      - name: Build stable iOS on EAS
+        if: steps.release.outputs.prerelease != 'true'
+        run: |
+          eas build \
+            --platform ios \
+            --profile "${{ steps.release.outputs.ios_profile }}" \
+            --non-interactive \
+            --wait \
+            --json > eas-build-ios.json
+
+      - name: Combine EAS build metadata
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+
+          const builds = ['eas-build-android.json', 'eas-build-ios.json']
+            .flatMap(path => {
+              const parsed = JSON.parse(readFileSync(path, 'utf8'));
+              return Array.isArray(parsed) ? parsed : [parsed];
+            });
+
+          writeFileSync('eas-builds.json', `${JSON.stringify(builds, null, 2)}\n`);
+          NODE
 
       - name: Add EAS builds to job summary
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          RELEASE_PROFILE: ${{ steps.release.outputs.profile }}
+          RELEASE_ANDROID_PROFILE: ${{ steps.release.outputs.android_profile }}
+          RELEASE_IOS_PROFILE: ${{ steps.release.outputs.ios_profile }}
         run: |
           node --input-type=module <<'NODE'
           import { appendFileSync, readFileSync } from 'node:fs';
@@ -99,7 +135,8 @@ jobs:
             [
               `## Telemob ${process.env.RELEASE_TAG}`,
               '',
-              `EAS profile: \`${process.env.RELEASE_PROFILE}\``,
+              `Android profile: \`${process.env.RELEASE_ANDROID_PROFILE}\``,
+              `iOS profile: \`${process.env.RELEASE_IOS_PROFILE}\``,
               '',
               '| Platform | Status | Build | Output |',
               '| --- | --- | --- | --- |',
@@ -161,6 +198,25 @@ jobs:
               '## Google Play Open testing',
               '',
               `Telemob ${process.env.RELEASE_TAG} was submitted to the Play beta track.`,
+              '',
+            ].join('\n')
+          );
+          NODE
+
+      - name: Add TestFlight submission to job summary
+        if: steps.release.outputs.prerelease == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from 'node:fs';
+
+          appendFileSync(
+            process.env.GITHUB_STEP_SUMMARY,
+            [
+              '## Apple TestFlight',
+              '',
+              `EAS Build handed Telemob ${process.env.RELEASE_TAG} to EAS Submit for TestFlight processing.`,
               '',
             ].join('\n')
           );

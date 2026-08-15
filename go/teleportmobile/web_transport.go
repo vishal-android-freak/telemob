@@ -124,6 +124,7 @@ type webSessionResponse struct {
 	TokenType              string    `json:"type"`
 	Token                  string    `json:"token"`
 	TokenExpiresIn         int       `json:"expires_in"`
+	SessionExpiresIn       int       `json:"sessionExpiresIn"`
 	SessionExpires         time.Time `json:"sessionExpires"`
 	SessionInactiveTimeout int       `json:"sessionInactiveTimeout"`
 }
@@ -363,11 +364,11 @@ func (w *webTransport) commitLogin(challengeID string, pending *pendingWebLogin,
 		return "", errors.New("Teleport did not return a web session cookie")
 	}
 	now := time.Now()
-	tokenExpiresAt := now.Add(time.Duration(response.TokenExpiresIn) * time.Second)
-	if response.TokenExpiresIn <= 0 {
-		tokenExpiresAt = now.Add(5 * time.Minute)
-	}
+	tokenExpiresAt := bearerTokenExpiry(now, response.TokenExpiresIn)
 	expiresAt := response.SessionExpires
+	if expiresAt.IsZero() && response.SessionExpiresIn > 0 {
+		expiresAt = now.Add(time.Duration(response.SessionExpiresIn) * time.Second)
+	}
 	if expiresAt.IsZero() {
 		expiresAt = tokenExpiresAt
 	}
@@ -382,11 +383,13 @@ func (w *webTransport) commitLogin(challengeID string, pending *pendingWebLogin,
 		cluster:        pending.ping.ClusterName,
 	}
 
+	w.renewMu.Lock()
 	w.mu.Lock()
 	delete(w.pending, challengeID)
 	pending.request.Password = ""
 	w.session = session
 	w.mu.Unlock()
+	w.renewMu.Unlock()
 	if pending.browser != nil {
 		pending.browser.close()
 	}
@@ -490,18 +493,23 @@ func (w *webTransport) restoreSession(snapshotJSON string) (string, error) {
 		username:       snapshot.Username,
 		cluster:        snapshot.Cluster,
 	}
+	w.renewMu.Lock()
+	defer w.renewMu.Unlock()
 	w.mu.Lock()
+	current := w.session
+	if current != nil && sameSessionIdentity(current, session) &&
+		time.Now().Before(current.expiresAt) &&
+		!snapshot.TokenExpiresAt.After(current.tokenExpiresAt) {
+		w.mu.Unlock()
+		return marshal(profileForWebSession(current))
+	}
 	w.session = session
 	w.mu.Unlock()
-	return marshal(authenticatedProfile{
-		ProxyAddress: snapshot.ProxyAddress,
-		Username:     snapshot.Username,
-		ClusterName:  snapshot.Cluster,
-		ValidUntil:   snapshot.ExpiresAt.UTC().Format(time.RFC3339),
-	})
+	return marshal(profileForWebSession(session))
 }
 
 func (w *webTransport) logout() {
+	w.renewMu.Lock()
 	w.mu.Lock()
 	w.session = nil
 	for _, pending := range w.pending {
@@ -514,6 +522,7 @@ func (w *webTransport) logout() {
 	terminals := w.terminals
 	w.terminals = make(map[string]*webTerminal)
 	w.mu.Unlock()
+	w.renewMu.Unlock()
 	for _, terminal := range terminals {
 		_ = terminal.conn.Close()
 	}
@@ -775,16 +784,54 @@ func (w *webTransport) freshSession() (*webSession, error) {
 		return nil, errors.New("Teleport returned an empty renewed session token")
 	}
 	now := time.Now()
+	tokenExpiresAt := bearerTokenExpiry(now, response.TokenExpiresIn)
+	expiresAt := response.SessionExpires
+	if expiresAt.IsZero() && response.SessionExpiresIn > 0 {
+		expiresAt = now.Add(time.Duration(response.SessionExpiresIn) * time.Second)
+	}
+	if expiresAt.IsZero() {
+		expiresAt = session.expiresAt
+	}
+	renewed := &webSession{
+		client:         session.client,
+		baseURL:        session.baseURL,
+		insecure:       session.insecure,
+		token:          response.Token,
+		tokenExpiresAt: tokenExpiresAt,
+		expiresAt:      expiresAt,
+		username:       session.username,
+		cluster:        session.cluster,
+	}
 	w.mu.Lock()
 	if w.session == session {
-		session.token = response.Token
-		session.tokenExpiresAt = now.Add(time.Duration(response.TokenExpiresIn) * time.Second)
-		if !response.SessionExpires.IsZero() {
-			session.expiresAt = response.SessionExpires
-		}
+		w.session = renewed
+		session = renewed
 	}
 	w.mu.Unlock()
 	return session, nil
+}
+
+func bearerTokenExpiry(now time.Time, expiresIn int) time.Time {
+	if expiresIn <= 0 {
+		return now.Add(5 * time.Minute)
+	}
+	return now.Add(time.Duration(expiresIn) * time.Second)
+}
+
+func sameSessionIdentity(left, right *webSession) bool {
+	return left.baseURL.String() == right.baseURL.String() &&
+		left.username == right.username &&
+		left.cluster == right.cluster &&
+		left.insecure == right.insecure
+}
+
+func profileForWebSession(session *webSession) authenticatedProfile {
+	return authenticatedProfile{
+		ProxyAddress: session.baseURL.String(),
+		Username:     session.username,
+		ClusterName:  session.cluster,
+		ValidUntil:   session.expiresAt.UTC().Format(time.RFC3339),
+	}
 }
 
 func (w *webTransport) pendingLogin(challengeID, method string) (*pendingWebLogin, error) {

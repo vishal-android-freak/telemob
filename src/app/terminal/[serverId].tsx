@@ -62,6 +62,8 @@ export default function TerminalScreen() {
   const lineInputRef = useRef<TextInput>(null);
   const terminalViewportRef = useRef<View>(null);
   const viewportSizeRef = useRef<{ width: number; height: number } | null>(null);
+  const sawActiveSessionRef = useRef(false);
+  const leftTerminalRef = useRef(false);
   const terminalTouchRef = useRef({
     pageX: 0,
     pageY: 0,
@@ -105,6 +107,22 @@ export default function TerminalScreen() {
       hidden.remove();
     };
   }, []);
+
+  useEffect(() => {
+    if (isActiveTerminalState(session.state)) {
+      sawActiveSessionRef.current = true;
+      return;
+    }
+    if (
+      session.state !== 'closed'
+      || !sawActiveSessionRef.current
+      || leftTerminalRef.current
+    ) {
+      return;
+    }
+    leftTerminalRef.current = true;
+    router.back();
+  }, [router, session.state]);
 
   const applyTerminalSize = useCallback((width: number, height: number, narrowTUI: boolean) => {
     const availableWidth = Math.max(1, width - TERMINAL_PADDING * 2);
@@ -293,7 +311,6 @@ export default function TerminalScreen() {
     setDisconnecting(true);
     try {
       await manager.disconnect();
-      router.replace('/servers');
     } catch {
       setDisconnecting(false);
     }
@@ -606,6 +623,13 @@ export default function TerminalScreen() {
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
+}
+
+function isActiveTerminalState(state: string) {
+  return state === 'connecting'
+    || state === 'connected'
+    || state === 'checking'
+    || state === 'reconnecting';
 }
 
 function UtilityKey({

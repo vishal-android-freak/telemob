@@ -49,7 +49,10 @@ committed to the repository.
 4. The resulting web session remains in the Go cookie jar. Telemob exports an
    encrypted snapshot to Expo SecureStore and restores it on cold launch until
    Teleport rejects or expires it.
-5. An authorization failure while loading resources clears the saved profile
+5. A mounted app always prefers the live Go session over its last saved
+   snapshot. Bearer-token renewals are persisted after opening or closing a
+   shell, and older asynchronous writes cannot replace newer credentials.
+6. An authorization failure while loading resources clears the saved profile
    and returns the user to login.
 
 Browser MFA avoids requiring Associated Domains or Digital Asset Links for
@@ -102,6 +105,11 @@ frames a monotonic sequence and retains a bounded 1 MiB replay window below
 React. On resume, the manager fetches missed frames, pings the WebSocket, and
 resizes the PTY. A failed check creates a new SSH session and a fresh terminal
 parser so old output is not appended to a replacement shell.
+
+Closing a shell transitions the process-wide session to `closed`. The terminal
+route then pops from the navigation stack, revealing the existing node list
+instead of creating a second copy of it. Closing SSH does not log out of
+Teleport; only an explicit logout or a proxy rejection clears the web session.
 
 Android starts a user-visible foreground service while SSH is active and adds a
 Disconnect notification action. If notification permission is denied, Android

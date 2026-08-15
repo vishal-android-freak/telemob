@@ -41,6 +41,11 @@
         "releaseStatus": "completed"
       }
     },
+    "testflight": {
+      "ios": {
+        "ascAppId": "6801581569"
+      }
+    },
     "production": {}
   }
 }

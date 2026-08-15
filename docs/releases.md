@@ -20,10 +20,10 @@ and iOS `buildNumber` on each build.
 
 ## Build profiles
 
-| Tag | EAS profile | Android | iOS |
+| Tag | EAS profiles | Android | iOS |
 | --- | --- | --- | --- |
 | `v1.X.Y` | `production` | Store-signed AAB | App Store archive |
-| `v1.X.Y-beta.N` | `beta` | Store-signed AAB; submitted to Play Open testing | App Store archive (build only) |
+| `v1.X.Y-beta.N` | `beta` | Store-signed AAB; submitted to Play Open testing | App Store archive; submitted to TestFlight |
 
 The workflow waits for both platform builds. A failed Android or iOS archive
 fails the GitHub Actions run. The EAS JSON results are uploaded as a workflow
@@ -32,8 +32,8 @@ the completed Android build is then submitted to Google Play's `beta` track,
 which is the Open testing track.
 
 Stable tags create builds without submitting them. Beta tags submit Android to
-Google Play Open testing, but do not submit iOS to App Store Connect and do not
-publish a GitHub Release.
+Google Play Open testing and upload iOS to TestFlight, but do not submit the iOS
+build for App Review or publish a GitHub Release.
 
 ## Store review demo
 
@@ -59,16 +59,19 @@ the notification Disconnect action.
    `expo.extra.eas.projectId` in `app.json`.
 2. Configure Android and iOS signing credentials once with interactive EAS
    builds for both the `production` and `beta` profiles.
-3. Create an Expo personal access token and add it to the GitHub repository as
+3. Assign an App Store Connect API key to `com.naarang.telemob` in EAS for
+   submissions, link the EAS project to the App Store Connect app, and set its
+   numeric Apple ID in the `testflight` submit profile.
+4. Create an Expo personal access token and add it to the GitHub repository as
    the `EXPO_TOKEN` Actions secret.
-4. Create a Google service account with access to the Google Play Android
+5. Create a Google service account with access to the Google Play Android
    Developer API. In Play Console, grant it access to Telemob with the `View app
    information` and `Release apps to testing tracks` permissions.
-5. Upload the service-account JSON key to the EAS project's Android credentials
+6. Upload the service-account JSON key to the EAS project's Android credentials
    for `com.naarang.telemob`. Do not commit the key or add it to GitHub Actions.
-6. Configure the Play Console Open testing track, including countries, tester
+7. Configure the Play Console Open testing track, including countries, tester
    access, and a feedback address.
-7. Protect release tags and limit who can create them.
+8. Protect release tags and limit who can create them.
 
 EAS cloud builds require network access and may consume plan build credits.
 Signing credentials remain managed by EAS; they are not committed to Git.
@@ -91,8 +94,9 @@ git push origin v1.2.3-beta.0
 ```
 
 Follow the `Mobile release` workflow in GitHub Actions. A beta tag builds both
-platforms and automatically submits the Android AAB to Play Open testing. Open
-the workflow's EAS links to inspect the builds and submission result.
+platforms, automatically submits the Android AAB to Play Open testing, and
+uploads the iOS archive to TestFlight. Open the workflow's EAS links to inspect
+the builds and submission results.
 
 ## Forks
 
