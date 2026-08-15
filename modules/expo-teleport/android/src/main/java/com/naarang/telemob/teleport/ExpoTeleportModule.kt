@@ -21,6 +21,10 @@ class ExpoTeleportModule : Module() {
   private val core by lazy { TeleportCoreHolder.core }
   private val browserMFARequests = mutableMapOf<String, String>()
   private val eventSink = object : EventSink {
+    override fun onTerminalData(sessionID: String, sequence: Long, data: ByteArray) {
+      NativeTerminalRegistry.handleData(sessionID, sequence, data)
+    }
+
     override fun onTerminalEvent(eventJSON: String) {
       val event = JSONObject(eventJSON)
       NativeTerminalRegistry.handleEvent(event)
@@ -29,6 +33,10 @@ class ExpoTeleportModule : Module() {
         event.put("alternateScreen", modes.alternateScreen)
         event.put("mouseTracking", modes.mouseTracking)
         event.put("bracketedPaste", modes.bracketedPaste)
+      }
+      NativeTerminalRegistry.takeEffects(sessionId)?.let { effects ->
+        effects.title?.let { event.put("title", it) }
+        if (effects.bellCount > 0) event.put("bellCount", effects.bellCount)
       }
       flushTerminalResponse(sessionId)
       if (event.optString("type") == "closed") {
@@ -62,6 +70,50 @@ class ExpoTeleportModule : Module() {
 
       AsyncFunction("scrollToBottom") { view: TeleportTerminalView ->
         NativeTerminalRegistry.scrollToBottom(view.sessionId)
+      }
+
+      AsyncFunction("selectRange") {
+          view: TeleportTerminalView,
+          startColumn: Int,
+          startRow: Int,
+          endColumn: Int,
+          endRow: Int ->
+        NativeTerminalRegistry.select(
+          view.sessionId,
+          startColumn,
+          startRow,
+          endColumn,
+          endRow
+        )
+      }
+
+      AsyncFunction("clearSelection") { view: TeleportTerminalView ->
+        NativeTerminalRegistry.clearSelection(view.sessionId)
+      }
+
+      AsyncFunction("copySelection") { view: TeleportTerminalView ->
+        val text = NativeTerminalRegistry.selectionText(view.sessionId).orEmpty()
+        if (text.isNotEmpty()) {
+          val context = appContext.reactContext
+            ?: throw IllegalStateException("The app context is unavailable.")
+          val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+          clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Terminal selection", text))
+        }
+        text.isNotEmpty()
+      }
+
+      AsyncFunction("findText") {
+          view: TeleportTerminalView,
+          query: String,
+          backwards: Boolean ->
+        NativeTerminalRegistry.find(view.sessionId, query, backwards)
+      }
+
+      AsyncFunction("hyperlinkAt") {
+          view: TeleportTerminalView,
+          column: Int,
+          row: Int ->
+        NativeTerminalRegistry.hyperlink(view.sessionId, column, row)
       }
     }
 
@@ -153,6 +205,76 @@ class ExpoTeleportModule : Module() {
 
     AsyncFunction("writeSessionAsync") { sessionID: String, data: String ->
       core.writeSession(sessionID, data)
+    }
+
+    AsyncFunction("sendTerminalKeyAsync") {
+        sessionID: String,
+        key: String,
+        text: String,
+        ctrl: Boolean,
+        alt: Boolean,
+        shift: Boolean,
+        action: String ->
+      NativeTerminalRegistry.encodeKey(
+        sessionID,
+        key,
+        text,
+        ctrl,
+        alt,
+        shift,
+        action
+      )?.let { core.writeSession(sessionID, it) }
+    }
+
+    AsyncFunction("sendTerminalMouseTapAsync") {
+        sessionID: String,
+        column: Int,
+        row: Int ->
+      val encoded = NativeTerminalRegistry.encodeMouseTap(sessionID, column, row)
+      if (encoded != null) core.writeSession(sessionID, encoded)
+      encoded != null
+    }
+
+    AsyncFunction("sendTerminalMouseEventAsync") {
+        sessionID: String,
+        column: Int,
+        row: Int,
+        action: String ->
+      val encoded = NativeTerminalRegistry.encodeMouseEvent(
+        sessionID,
+        column,
+        row,
+        action
+      )
+      if (encoded != null) core.writeSession(sessionID, encoded)
+      encoded != null
+    }
+
+    AsyncFunction("sendTerminalMouseScrollAsync") {
+        sessionID: String,
+        column: Int,
+        row: Int,
+        direction: String,
+        steps: Int ->
+      val encoded = NativeTerminalRegistry.encodeMouseScroll(
+        sessionID,
+        column,
+        row,
+        direction,
+        steps
+      )
+      if (encoded != null) core.writeSession(sessionID, encoded)
+      encoded != null
+    }
+
+    AsyncFunction("sendTerminalFocusAsync") { sessionID: String, focused: Boolean ->
+      NativeTerminalRegistry.encodeFocus(sessionID, focused)
+        ?.let { core.writeSession(sessionID, it) }
+    }
+
+    AsyncFunction("pasteSessionAsync") { sessionID: String, data: String ->
+      NativeTerminalRegistry.encodePaste(sessionID, data)
+        ?.let { core.writeSession(sessionID, it) }
     }
 
     AsyncFunction("resizeSessionAsync") { sessionID: String, columns: Int, rows: Int ->

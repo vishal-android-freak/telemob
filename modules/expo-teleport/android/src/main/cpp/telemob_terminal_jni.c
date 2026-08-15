@@ -9,6 +9,28 @@ static TelemobTerminal* from_handle(jlong handle) {
   return (TelemobTerminal*)(intptr_t)handle;
 }
 
+static jbyteArray encoded_bytes(
+    JNIEnv* env,
+    bool success,
+    uint8_t* output,
+    size_t output_size) {
+  if (!success || output_size > INT32_MAX) {
+    telemob_terminal_bytes_free(output);
+    return NULL;
+  }
+  jbyteArray result = (*env)->NewByteArray(env, (jsize)output_size);
+  if (result != NULL && output_size > 0) {
+    (*env)->SetByteArrayRegion(
+        env,
+        result,
+        0,
+        (jsize)output_size,
+        (const jbyte*)output);
+  }
+  telemob_terminal_bytes_free(output);
+  return result;
+}
+
 JNIEXPORT jlong JNICALL
 Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeCreate(
     JNIEnv* env,
@@ -128,6 +150,101 @@ Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeScrollToBottom(
   if (handle != 0) telemob_terminal_scroll_to_bottom(from_handle(handle));
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeSelect(
+    JNIEnv* env,
+    jobject self,
+    jlong handle,
+    jint start_column,
+    jint start_row,
+    jint end_column,
+    jint end_row) {
+  (void)env;
+  (void)self;
+  if (handle == 0 || start_column < 1 || start_column > UINT16_MAX ||
+      start_row < 1 || start_row > UINT16_MAX || end_column < 1 ||
+      end_column > UINT16_MAX || end_row < 1 || end_row > UINT16_MAX) {
+    return JNI_FALSE;
+  }
+  return telemob_terminal_select(
+             from_handle(handle),
+             (uint16_t)start_column,
+             (uint16_t)start_row,
+             (uint16_t)end_column,
+             (uint16_t)end_row)
+      ? JNI_TRUE
+      : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeClearSelection(
+    JNIEnv* env,
+    jobject self,
+    jlong handle) {
+  (void)env;
+  (void)self;
+  if (handle != 0) telemob_terminal_selection_clear(from_handle(handle));
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeSelectionText(
+    JNIEnv* env,
+    jobject self,
+    jlong handle) {
+  (void)self;
+  if (handle == 0) return NULL;
+  uint8_t* output = NULL;
+  size_t output_size = 0;
+  const bool success =
+      telemob_terminal_selection_text(from_handle(handle), &output, &output_size);
+  return encoded_bytes(env, success, output, output_size);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeFind(
+    JNIEnv* env,
+    jobject self,
+    jlong handle,
+    jbyteArray query,
+    jboolean backwards) {
+  (void)self;
+  if (handle == 0 || query == NULL) return JNI_FALSE;
+  const jsize length = (*env)->GetArrayLength(env, query);
+  if (length <= 0) return JNI_FALSE;
+  jbyte* bytes = (*env)->GetByteArrayElements(env, query, NULL);
+  if (bytes == NULL) return JNI_FALSE;
+  const bool found = telemob_terminal_find(
+      from_handle(handle),
+      (const uint8_t*)bytes,
+      (size_t)length,
+      backwards == JNI_TRUE);
+  (*env)->ReleaseByteArrayElements(env, query, bytes, JNI_ABORT);
+  return found ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeHyperlink(
+    JNIEnv* env,
+    jobject self,
+    jlong handle,
+    jint column,
+    jint row) {
+  (void)self;
+  if (handle == 0 || column < 1 || column > UINT16_MAX || row < 1 ||
+      row > UINT16_MAX) {
+    return NULL;
+  }
+  uint8_t* output = NULL;
+  size_t output_size = 0;
+  const bool success = telemob_terminal_hyperlink(
+      from_handle(handle),
+      (uint16_t)column,
+      (uint16_t)row,
+      &output,
+      &output_size);
+  return encoded_bytes(env, success, output, output_size);
+}
+
 JNIEXPORT jbooleanArray JNICALL
 Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeModes(
     JNIEnv* env,
@@ -164,20 +281,142 @@ Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeTakePtyWrite(
   if (handle == 0) return NULL;
   uint8_t* output = NULL;
   size_t output_size = 0;
-  if (!telemob_terminal_take_pty_write(from_handle(handle), &output, &output_size) ||
-      output_size > INT32_MAX) {
-    telemob_terminal_bytes_free(output);
+  const bool success =
+      telemob_terminal_take_pty_write(from_handle(handle), &output, &output_size);
+  return encoded_bytes(env, success, output, output_size);
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeTakeTitle(
+    JNIEnv* env,
+    jobject self,
+    jlong handle) {
+  (void)self;
+  if (handle == 0) return NULL;
+  uint8_t* output = NULL;
+  size_t output_size = 0;
+  const bool success =
+      telemob_terminal_take_title(from_handle(handle), &output, &output_size);
+  return encoded_bytes(env, success, output, output_size);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeTakeBellCount(
+    JNIEnv* env,
+    jobject self,
+    jlong handle) {
+  (void)env;
+  (void)self;
+  return handle == 0 ? 0 : (jint)telemob_terminal_take_bell_count(from_handle(handle));
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeEncodeKey(
+    JNIEnv* env,
+    jobject self,
+    jlong handle,
+    jint key,
+    jbyteArray text,
+    jint modifiers,
+    jint action) {
+  (void)self;
+  if (handle == 0) return NULL;
+  jbyte* text_bytes = NULL;
+  jsize text_length = 0;
+  if (text != NULL) {
+    text_length = (*env)->GetArrayLength(env, text);
+    if (text_length > 0) {
+      text_bytes = (*env)->GetByteArrayElements(env, text, NULL);
+      if (text_bytes == NULL) return NULL;
+    }
+  }
+  uint8_t* output = NULL;
+  size_t output_size = 0;
+  const bool success = telemob_terminal_encode_key(
+      from_handle(handle),
+      (int32_t)key,
+      (const uint8_t*)text_bytes,
+      (size_t)text_length,
+      (uint16_t)modifiers,
+      (int32_t)action,
+      &output,
+      &output_size);
+  if (text_bytes != NULL) {
+    (*env)->ReleaseByteArrayElements(env, text, text_bytes, JNI_ABORT);
+  }
+  return encoded_bytes(env, success, output, output_size);
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeEncodeMouse(
+    JNIEnv* env,
+    jobject self,
+    jlong handle,
+    jint action,
+    jint button,
+    jint modifiers,
+    jint column,
+    jint row) {
+  (void)self;
+  if (handle == 0 || column < 1 || column > UINT16_MAX ||
+      row < 1 || row > UINT16_MAX) {
     return NULL;
   }
-  jbyteArray result = (*env)->NewByteArray(env, (jsize)output_size);
-  if (result != NULL && output_size > 0) {
-    (*env)->SetByteArrayRegion(
-        env,
-        result,
-        0,
-        (jsize)output_size,
-        (const jbyte*)output);
+  uint8_t* output = NULL;
+  size_t output_size = 0;
+  const bool success = telemob_terminal_encode_mouse(
+      from_handle(handle),
+      (int32_t)action,
+      (int32_t)button,
+      (uint16_t)modifiers,
+      (uint16_t)column,
+      (uint16_t)row,
+      &output,
+      &output_size);
+  return encoded_bytes(env, success, output, output_size);
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeEncodeFocus(
+    JNIEnv* env,
+    jobject self,
+    jlong handle,
+    jboolean focused) {
+  (void)self;
+  if (handle == 0) return NULL;
+  uint8_t* output = NULL;
+  size_t output_size = 0;
+  const bool success = telemob_terminal_encode_focus(
+      from_handle(handle),
+      focused == JNI_TRUE,
+      &output,
+      &output_size);
+  return encoded_bytes(env, success, output, output_size);
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_naarang_telemob_teleport_GhosttyTerminalEngine_nativeEncodePaste(
+    JNIEnv* env,
+    jobject self,
+    jlong handle,
+    jbyteArray data) {
+  (void)self;
+  if (handle == 0 || data == NULL) return NULL;
+  const jsize data_length = (*env)->GetArrayLength(env, data);
+  jbyte* data_bytes = data_length > 0
+      ? (*env)->GetByteArrayElements(env, data, NULL)
+      : NULL;
+  if (data_length > 0 && data_bytes == NULL) return NULL;
+  uint8_t* output = NULL;
+  size_t output_size = 0;
+  const bool success = telemob_terminal_encode_paste(
+      from_handle(handle),
+      (const uint8_t*)data_bytes,
+      (size_t)data_length,
+      &output,
+      &output_size);
+  if (data_bytes != NULL) {
+    (*env)->ReleaseByteArrayElements(env, data, data_bytes, JNI_ABORT);
   }
-  telemob_terminal_bytes_free(output);
-  return result;
+  return encoded_bytes(env, success, output, output_size);
 }

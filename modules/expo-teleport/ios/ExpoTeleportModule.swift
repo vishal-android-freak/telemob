@@ -19,6 +19,10 @@ public final class ExpoTeleportModule: Module {
       payload["mouseTracking"] = modes.mouseTracking
       payload["bracketedPaste"] = modes.bracketedPaste
     }
+    if let effects = NativeTerminalRegistry.shared.takeEffects(sessionID: sessionID) {
+      if let title = effects.title { payload["title"] = title }
+      if effects.bellCount > 0 { payload["bellCount"] = effects.bellCount }
+    }
     if
       let self,
       let response = NativeTerminalRegistry.shared.takePtyWrite(sessionID: sessionID)
@@ -59,6 +63,55 @@ public final class ExpoTeleportModule: Module {
 
       AsyncFunction("scrollToBottom") { (view: TeleportTerminalView) in
         NativeTerminalRegistry.shared.scrollToBottom(sessionID: view.sessionID)
+      }
+
+      AsyncFunction("selectRange") {
+        (
+          view: TeleportTerminalView,
+          startColumn: Int,
+          startRow: Int,
+          endColumn: Int,
+          endRow: Int
+        ) -> Bool in
+        NativeTerminalRegistry.shared.select(
+          sessionID: view.sessionID,
+          startColumn: startColumn,
+          startRow: startRow,
+          endColumn: endColumn,
+          endRow: endRow
+        )
+      }
+
+      AsyncFunction("clearSelection") { (view: TeleportTerminalView) in
+        NativeTerminalRegistry.shared.clearSelection(sessionID: view.sessionID)
+      }
+
+      AsyncFunction("copySelection") { (view: TeleportTerminalView) -> Bool in
+        guard
+          let text = NativeTerminalRegistry.shared.selectionText(sessionID: view.sessionID),
+          !text.isEmpty
+        else { return false }
+        UIPasteboard.general.string = text
+        return true
+      }.runOnQueue(.main)
+
+      AsyncFunction("findText") {
+        (view: TeleportTerminalView, query: String, backwards: Bool) -> Bool in
+        NativeTerminalRegistry.shared.find(
+          sessionID: view.sessionID,
+          query: query,
+          backwards: backwards
+        )
+      }
+
+
+      AsyncFunction("hyperlinkAt") {
+        (view: TeleportTerminalView, column: Int, row: Int) -> String? in
+        NativeTerminalRegistry.shared.hyperlink(
+          sessionID: view.sessionID,
+          column: column,
+          row: row
+        )
       }
     }
 
@@ -197,6 +250,89 @@ public final class ExpoTeleportModule: Module {
       try core.writeSession(sessionID, data: data)
     }
 
+    AsyncFunction("sendTerminalKeyAsync") {
+      (
+        sessionID: String,
+        key: String,
+        text: String,
+        ctrl: Bool,
+        alt: Bool,
+        shift: Bool,
+        action: String
+      ) throws in
+      if let encoded = NativeTerminalRegistry.shared.encodeKey(
+        sessionID: sessionID,
+        key: key,
+        text: text,
+        ctrl: ctrl,
+        alt: alt,
+        shift: shift,
+        action: action
+      ) {
+        try core.writeSession(sessionID, data: encoded)
+      }
+    }
+
+    AsyncFunction("sendTerminalMouseTapAsync") {
+      (sessionID: String, column: Int, row: Int) throws -> Bool in
+      guard let encoded = NativeTerminalRegistry.shared.encodeMouseTap(
+        sessionID: sessionID,
+        column: column,
+        row: row
+      ) else { return false }
+      try core.writeSession(sessionID, data: encoded)
+      return true
+    }
+
+    AsyncFunction("sendTerminalMouseEventAsync") {
+      (sessionID: String, column: Int, row: Int, action: String) throws -> Bool in
+      guard let encoded = NativeTerminalRegistry.shared.encodeMouseEvent(
+        sessionID: sessionID,
+        column: column,
+        row: row,
+        action: action
+      ) else { return false }
+      try core.writeSession(sessionID, data: encoded)
+      return true
+    }
+
+    AsyncFunction("sendTerminalMouseScrollAsync") {
+      (
+        sessionID: String,
+        column: Int,
+        row: Int,
+        direction: String,
+        steps: Int
+      ) throws -> Bool in
+      guard let encoded = NativeTerminalRegistry.shared.encodeMouseScroll(
+        sessionID: sessionID,
+        column: column,
+        row: row,
+        direction: direction,
+        steps: steps
+      ) else { return false }
+      try core.writeSession(sessionID, data: encoded)
+      return true
+    }
+
+    AsyncFunction("sendTerminalFocusAsync") { (sessionID: String, focused: Bool) throws in
+      if let encoded = NativeTerminalRegistry.shared.encodeFocus(
+        sessionID: sessionID,
+        focused: focused
+      ) {
+        try core.writeSession(sessionID, data: encoded)
+      }
+    }
+
+    AsyncFunction("pasteSessionAsync") { (sessionID: String, data: String) throws in
+      if let encoded = NativeTerminalRegistry.shared.encodePaste(
+        sessionID: sessionID,
+        data: data
+      ) {
+        try core.writeSession(sessionID, data: encoded)
+      }
+    }
+
     AsyncFunction("resizeSessionAsync") { (sessionID: String, columns: Int, rows: Int) throws in
       try core.resizeSession(sessionID, columns: columns, rows: rows)
     }
@@ -307,6 +443,15 @@ private final class TerminalEventSink: NSObject, TeleportmobileEventSinkProtocol
 
   init(handler: @escaping (String) -> Void) {
     self.handler = handler
+  }
+
+  func onTerminalData(_ sessionID: String?, sequence: Int64, data: Data?) {
+    guard let sessionID, let data else { return }
+    NativeTerminalRegistry.shared.handleData(
+      sessionID: sessionID,
+      sequence: sequence,
+      data: data
+    )
   }
 
   func onTerminalEvent(_ eventJSON: String?) {

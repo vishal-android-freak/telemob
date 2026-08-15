@@ -26,7 +26,7 @@ module around `libghostty-vt` and native Android/iOS drawing surfaces.
 The rail includes:
 
 - one-shot `CTRL` and `ALT` modifiers;
-- paste and optional whole-line input;
+- paste, selection copy, terminal-buffer search, and optional whole-line input;
 - `Ctrl+C`, `ESC`, and `TAB`;
 - arrow, `HOME`, `END`, `PGUP`, and `PGDN` keys;
 - `INSERT`, `DELETE`, and `BACKSPACE`;
@@ -58,10 +58,20 @@ swipe becomes repeated SGR wheel events. This supports buttons and scrolling in
 compatible TUIs without turning every terminal touch into remote input.
 
 When mouse tracking is disabled, swipes scroll Telemob's local terminal history
-and taps can focus the keyboard. Terminal coordinates are calculated from the
-same measured cell grid used to size the remote PTY.
+and taps can focus the keyboard. A long press begins native terminal selection;
+drag to extend it and use `COPY` to place the exact selected text on the system
+clipboard. `FIND` searches the full Ghostty screen and scrollback buffer with
+next and previous result navigation. Safe OSC 8 `http` and `https` links can be
+opened after an explicit confirmation.
+
+When mouse tracking is enabled, a quick tap remains a standard press/release
+and a vertical swipe remains wheel input. Holding before dragging sends an
+ordered press, motion, and release sequence, which supports TUI controls that
+need mouse drag rather than a click. Terminal coordinates are calculated from
+the same measured cell grid used to size the remote PTY.
 
 ## Future work
 
 Custom key layouts, user-defined macros, hardware-keyboard shortcut discovery,
-selection/copy gestures, and richer multi-touch handling remain future work.
+cross-line regular-expression search, and richer multi-touch handling remain
+future work.

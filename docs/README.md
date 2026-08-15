@@ -13,6 +13,8 @@ with, endorsed by, or maintained by Gravitational Inc. or the Teleport project.
   GitHub Actions behavior.
 - [Terminal keyboard](terminal-keyboard.md) — key rail, direct input, modifiers,
   and mouse-event behavior.
+- [Terminal performance](terminal-performance.md) — native render pipeline,
+  profiling markers, workloads, and the GPU decision gate.
 
 The public project overview, compatibility notice, credits, and license are in
 the repository [README](../README.md).

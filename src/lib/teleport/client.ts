@@ -1,5 +1,14 @@
 import { Platform } from 'react-native';
 
+import {
+  terminalKeySequence,
+  terminalMouseEventSequence,
+  terminalMouseScrollSequence,
+  terminalMouseTapSequence,
+  terminalTextSequence,
+  type TerminalModifiers,
+} from '@/lib/terminal/keys';
+
 import type {
   AuthChallenge,
   AuthenticatedProfile,
@@ -26,6 +35,29 @@ export interface TeleportClient {
   listServers(): Promise<TeleportServer[]>;
   openSession(target: SessionTarget): Promise<SessionHandle>;
   writeSession(sessionId: string, data: string): Promise<void>;
+  sendTerminalKey(
+    sessionId: string,
+    key: string,
+    text: string,
+    modifiers: TerminalModifiers,
+    action?: 'press' | 'repeat' | 'release'
+  ): Promise<void>;
+  sendTerminalMouseTap(sessionId: string, column: number, row: number): Promise<boolean>;
+  sendTerminalMouseEvent(
+    sessionId: string,
+    column: number,
+    row: number,
+    action: 'press' | 'motion' | 'release'
+  ): Promise<boolean>;
+  sendTerminalMouseScroll(
+    sessionId: string,
+    column: number,
+    row: number,
+    direction: 'up' | 'down',
+    steps: number
+  ): Promise<boolean>;
+  sendTerminalFocus(sessionId: string, focused: boolean): Promise<void>;
+  pasteSession(sessionId: string, data: string): Promise<void>;
   resizeSession(
     sessionId: string,
     columns: number,
@@ -81,6 +113,31 @@ type NativeModuleShape = {
   listServersAsync(): Promise<string>;
   openSessionAsync(targetJson: string): Promise<string>;
   writeSessionAsync(sessionId: string, data: string): Promise<void>;
+  sendTerminalKeyAsync(
+    sessionId: string,
+    key: string,
+    text: string,
+    ctrl: boolean,
+    alt: boolean,
+    shift: boolean,
+    action: string
+  ): Promise<void>;
+  sendTerminalMouseTapAsync(sessionId: string, column: number, row: number): Promise<boolean>;
+  sendTerminalMouseEventAsync(
+    sessionId: string,
+    column: number,
+    row: number,
+    action: string
+  ): Promise<boolean>;
+  sendTerminalMouseScrollAsync(
+    sessionId: string,
+    column: number,
+    row: number,
+    direction: string,
+    steps: number
+  ): Promise<boolean>;
+  sendTerminalFocusAsync(sessionId: string, focused: boolean): Promise<void>;
+  pasteSessionAsync(sessionId: string, data: string): Promise<void>;
   resizeSessionAsync(
     sessionId: string,
     columns: number,
@@ -147,6 +204,61 @@ class NativeTeleportClient implements TeleportClient {
     return this.native.writeSessionAsync(sessionId, data);
   }
 
+  sendTerminalKey(
+    sessionId: string,
+    key: string,
+    text: string,
+    modifiers: TerminalModifiers,
+    action: 'press' | 'repeat' | 'release' = 'press'
+  ) {
+    return this.native.sendTerminalKeyAsync(
+      sessionId,
+      key,
+      text,
+      modifiers.ctrl,
+      modifiers.alt,
+      false,
+      action
+    );
+  }
+
+  sendTerminalMouseTap(sessionId: string, column: number, row: number) {
+    return this.native.sendTerminalMouseTapAsync(sessionId, column, row);
+  }
+
+  sendTerminalMouseEvent(
+    sessionId: string,
+    column: number,
+    row: number,
+    action: 'press' | 'motion' | 'release'
+  ) {
+    return this.native.sendTerminalMouseEventAsync(sessionId, column, row, action);
+  }
+
+  sendTerminalMouseScroll(
+    sessionId: string,
+    column: number,
+    row: number,
+    direction: 'up' | 'down',
+    steps: number
+  ) {
+    return this.native.sendTerminalMouseScrollAsync(
+      sessionId,
+      column,
+      row,
+      direction,
+      steps
+    );
+  }
+
+  sendTerminalFocus(sessionId: string, focused: boolean) {
+    return this.native.sendTerminalFocusAsync(sessionId, focused);
+  }
+
+  pasteSession(sessionId: string, data: string) {
+    return this.native.pasteSessionAsync(sessionId, data);
+  }
+
   resizeSession(sessionId: string, columns: number, rows: number) {
     return this.native.resizeSessionAsync(sessionId, columns, rows);
   }
@@ -156,9 +268,16 @@ class NativeTeleportClient implements TeleportClient {
   }
 
   async sessionOutput(sessionId: string, afterSequence: number) {
-    return JSON.parse(
+    const output = JSON.parse(
       await this.native.sessionOutputAsync(sessionId, afterSequence)
     ) as TerminalOutputSnapshot;
+    output.chunks = Array.isArray(output.chunks)
+      ? output.chunks.map(chunk => ({
+          sequence: chunk.sequence,
+          data: typeof chunk.data === 'string' ? chunk.data : '',
+        }))
+      : [];
+    return output;
   }
 
   closeSession(sessionId: string) {
@@ -327,6 +446,56 @@ class DevelopmentTeleportClient implements TeleportClient {
       if (response.output) this.emitData(sessionId, response.output);
       if (response.close) this.finishSession(sessionId, 'Remote session closed');
     }, 90);
+  }
+
+  sendTerminalKey(
+    sessionId: string,
+    key: string,
+    text: string,
+    modifiers: TerminalModifiers
+  ) {
+    const sequence = key === 'text'
+      ? terminalTextSequence(text, modifiers)
+      : terminalKeySequence(key, modifiers);
+    return sequence ? this.writeSession(sessionId, sequence) : Promise.resolve();
+  }
+
+  async sendTerminalMouseTap(sessionId: string, column: number, row: number) {
+    await this.writeSession(sessionId, terminalMouseTapSequence(column, row));
+    return true;
+  }
+
+  async sendTerminalMouseEvent(
+    sessionId: string,
+    column: number,
+    row: number,
+    action: 'press' | 'motion' | 'release'
+  ) {
+    await this.writeSession(
+      sessionId,
+      terminalMouseEventSequence(column, row, action)
+    );
+    return true;
+  }
+
+  async sendTerminalMouseScroll(
+    sessionId: string,
+    column: number,
+    row: number,
+    direction: 'up' | 'down',
+    steps: number
+  ) {
+    await this.writeSession(
+      sessionId,
+      terminalMouseScrollSequence(column, row, direction, steps)
+    );
+    return true;
+  }
+
+  async sendTerminalFocus() {}
+
+  pasteSession(sessionId: string, data: string) {
+    return this.writeSession(sessionId, data);
   }
 
   async resizeSession() {}

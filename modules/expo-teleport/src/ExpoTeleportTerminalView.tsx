@@ -11,6 +11,11 @@ function ExpoTeleportTerminalView(props, ref) {
   useImperativeHandle(ref, () => ({
     scrollBy: async () => undefined,
     scrollToBottom: async () => undefined,
+    selectRange: async () => false,
+    clearSelection: async () => undefined,
+    copySelection: async () => false,
+    findText: async () => false,
+    hyperlinkAt: async () => null,
   }), []);
   return (
     <View style={[props.style, { backgroundColor: '#0B1117', overflow: 'hidden' }]}>

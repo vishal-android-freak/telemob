@@ -8,6 +8,16 @@ export type TerminalDimensionsEvent = NativeSyntheticEvent<{
 export type ExpoTeleportTerminalViewHandle = {
   scrollBy(rows: number): Promise<void>;
   scrollToBottom(): Promise<void>;
+  selectRange(
+    startColumn: number,
+    startRow: number,
+    endColumn: number,
+    endRow: number
+  ): Promise<boolean>;
+  clearSelection(): Promise<void>;
+  copySelection(): Promise<boolean>;
+  findText(query: string, backwards: boolean): Promise<boolean>;
+  hyperlinkAt(column: number, row: number): Promise<string | null>;
 };
 
 export type ExpoTeleportTerminalViewProps = ViewProps & {

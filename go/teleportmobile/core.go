@@ -14,10 +14,12 @@ import (
 	"time"
 )
 
-// EventSink is implemented by the Swift and Kotlin bridges. Keeping a single
-// JSON event callback makes the generated gomobile API stable as event types
-// evolve.
+// EventSink is implemented by the Swift and Kotlin bridges. Terminal bytes use
+// a dedicated callback so arbitrary UTF-8 and control data reaches libghostty
+// without a JSON or platform String round trip. The JSON callback carries only
+// evolving event metadata.
 type EventSink interface {
+	OnTerminalData(sessionID string, sequence int64, data []byte)
 	OnTerminalEvent(eventJSON string)
 }
 
@@ -48,7 +50,7 @@ const (
 
 type sessionOutputChunk struct {
 	Sequence int64  `json:"sequence"`
-	Data     string `json:"data"`
+	Data     []byte `json:"dataBase64"`
 }
 
 type sessionOutputRecord struct {
@@ -586,28 +588,36 @@ func (c *Core) emit(event map[string]any) {
 	c.mu.Lock()
 	sessionID, _ := event["sessionId"].(string)
 	eventType, _ := event["type"].(string)
+	var terminalData []byte
+	var terminalSequence int64
 	if sessionID != "" {
 		record := c.ensureSessionOutputLocked(sessionID)
 		switch eventType {
 		case "data":
 			if data, ok := event["data"].(string); ok {
 				record.LatestSequence++
-				event["sequence"] = record.LatestSequence
-				if len(data) > maxSessionOutputBytes {
-					data = data[len(data)-maxSessionOutputBytes:]
+				terminalSequence = record.LatestSequence
+				event["sequence"] = terminalSequence
+				terminalData = []byte(data)
+				bufferData := terminalData
+				if len(bufferData) > maxSessionOutputBytes {
+					bufferData = bufferData[len(bufferData)-maxSessionOutputBytes:]
 					record.DiscardedThrough = record.LatestSequence
 				}
 				record.Chunks = append(record.Chunks, sessionOutputChunk{
 					Sequence: record.LatestSequence,
-					Data:     data,
+					Data:     append([]byte(nil), bufferData...),
 				})
-				record.Bytes += len(data)
+				record.Bytes += len(bufferData)
 				for record.Bytes > maxSessionOutputBytes && len(record.Chunks) > 0 {
 					discarded := record.Chunks[0]
 					record.Chunks = record.Chunks[1:]
 					record.Bytes -= len(discarded.Data)
 					record.DiscardedThrough = discarded.Sequence
 				}
+				// React only needs sequencing and mode metadata for native terminals.
+				// Keep the event shape stable without serializing terminal bytes.
+				event["data"] = ""
 			}
 		case "error":
 			record.Error, _ = event["message"].(string)
@@ -618,6 +628,9 @@ func (c *Core) emit(event map[string]any) {
 	}
 	sink := c.sink
 	c.mu.Unlock()
+	if sink != nil && len(terminalData) > 0 {
+		sink.OnTerminalData(sessionID, terminalSequence, terminalData)
+	}
 	encoded, err := marshal(event)
 	if err != nil {
 		return

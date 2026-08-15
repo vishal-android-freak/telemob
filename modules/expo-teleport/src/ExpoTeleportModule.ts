@@ -17,6 +17,31 @@ declare class ExpoTeleportModule extends NativeModule<ExpoTeleportModuleEvents> 
   listServersAsync(): Promise<string>;
   openSessionAsync(targetJson: string): Promise<string>;
   writeSessionAsync(sessionId: string, data: string): Promise<void>;
+  sendTerminalKeyAsync(
+    sessionId: string,
+    key: string,
+    text: string,
+    ctrl: boolean,
+    alt: boolean,
+    shift: boolean,
+    action: string
+  ): Promise<void>;
+  sendTerminalMouseTapAsync(sessionId: string, column: number, row: number): Promise<boolean>;
+  sendTerminalMouseEventAsync(
+    sessionId: string,
+    column: number,
+    row: number,
+    action: string
+  ): Promise<boolean>;
+  sendTerminalMouseScrollAsync(
+    sessionId: string,
+    column: number,
+    row: number,
+    direction: string,
+    steps: number
+  ): Promise<boolean>;
+  sendTerminalFocusAsync(sessionId: string, focused: boolean): Promise<void>;
+  pasteSessionAsync(sessionId: string, data: string): Promise<void>;
   resizeSessionAsync(
     sessionId: string,
     columns: number,

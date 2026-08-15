@@ -163,11 +163,12 @@ Maintainer release builds are tag-driven:
 - `v1.2.3` builds Android and iOS with the EAS `production` profile.
 - `v1.2.3-beta.0` builds both platforms with the EAS `beta` profile.
 
-The workflow validates the tag, derives the user-facing app version, waits for
-both EAS builds, and stores their build metadata with the workflow run. Stable
-Android builds produce an AAB for Google Play; beta Android builds produce an
-installable APK. Stable iOS builds use App Store distribution, while beta iOS
-builds use registered-device ad hoc distribution.
+The workflow validates the tag, derives the user-facing app version, then starts
+independent Android and iOS jobs. A platform failure is reported without
+cancelling the other platform's build. Both Android profiles produce a signed
+AAB; beta builds are submitted to Play Open testing. Both iOS profiles use App
+Store distribution; beta builds are submitted to TestFlight. Each platform
+stores its own EAS build metadata with the workflow run.
 
 See [Releases](docs/releases.md) for required secrets, credentials, tagging, and
 fork setup.

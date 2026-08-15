@@ -152,6 +152,10 @@ Teleport cluster on the affected platform. Terminal changes should be checked
 with an ordinary shell and at least one alternate-screen TUI, in both portrait
 and landscape when viewport behavior changed.
 
+Use the cross-platform markers and repeatable workloads in
+[Terminal performance](terminal-performance.md) before changing the renderer or
+claiming a performance improvement.
+
 ## Generated and local-only files
 
 Do not commit:

@@ -103,11 +103,14 @@ content width. On short landscape screens, terminal chrome becomes denser so
 the PTY retains as much height as possible. iOS and Android both permit runtime
 orientation changes, and iPad is an enabled native target.
 
-Touch taps and swipes become standard SGR mouse events only when Ghostty reports
-that the remote application enabled mouse tracking. Keyboard input otherwise
-passes through as terminal bytes. Ctrl and Alt are one-shot modifiers for the
-next key, avoiding a prefix sequence such as `Ctrl+B`, `Q` becoming
-`Ctrl+B`, `Ctrl+Q`.
+Touch taps, wheel gestures, and held drags become standard Ghostty-encoded mouse
+events only when the remote application enables mouse tracking. Without mouse
+tracking, swipes navigate local scrollback, held drags select native terminal
+text, and safe OSC 8 links can be opened with confirmation. Full-buffer search,
+selection copy, and the scrollbar operate directly on Ghostty's screen state.
+Keyboard input otherwise passes through as terminal bytes. Ctrl and Alt are
+one-shot modifiers for the next key, avoiding a prefix sequence such as
+`Ctrl+B`, `Q` becoming `Ctrl+B`, `Ctrl+Q`.
 
 ## Session and background ownership
 

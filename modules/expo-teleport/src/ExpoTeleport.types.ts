@@ -10,6 +10,8 @@ export type TerminalEventPayload = {
   alternateScreen?: boolean;
   mouseTracking?: boolean;
   bracketedPaste?: boolean;
+  title?: string;
+  bellCount?: number;
   reason?: string;
   message?: string;
 };

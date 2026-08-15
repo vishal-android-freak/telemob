@@ -2,7 +2,7 @@ import { AppState, Platform, type AppStateStatus } from 'react-native';
 
 import { getTeleportClient, type TeleportClient } from '@/lib/teleport/client';
 import { saveSessionSnapshot } from '@/lib/teleport/profile-store';
-import { terminalMouseScrollSequence, terminalMouseTapSequence } from '@/lib/terminal/keys';
+import type { TerminalModifiers } from '@/lib/terminal/keys';
 import type {
   SessionTarget,
   TerminalEvent,
@@ -25,6 +25,7 @@ export type TerminalSessionSnapshot = {
   error: string;
   alternateScreen: boolean;
   mouseTracking: boolean;
+  terminalTitle: string;
   fallbackText: string;
 };
 
@@ -43,6 +44,7 @@ class TerminalSessionManager {
   private error = '';
   private alternateScreen = false;
   private mouseTracking = false;
+  private terminalTitle = '';
   private bracketedPaste = false;
   private fallbackText = '';
   private lastSequence = 0;
@@ -70,6 +72,7 @@ class TerminalSessionManager {
     error: this.error,
     alternateScreen: this.alternateScreen,
     mouseTracking: this.mouseTracking,
+    terminalTitle: this.terminalTitle,
     fallbackText: this.fallbackText,
   });
 
@@ -118,25 +121,64 @@ class TerminalSessionManager {
     });
   }
 
+  sendKey(key: string, text = '', modifiers: TerminalModifiers = { ctrl: false, alt: false }) {
+    if (!this.sessionId || this.state !== 'connected') {
+      return Promise.reject(new Error('The terminal is not connected.'));
+    }
+    return this.client.sendTerminalKey(this.sessionId, key, text, modifiers).catch(error => {
+      this.setError(messageFrom(error));
+      throw error;
+    });
+  }
+
   paste(data: string) {
-    const payload = this.bracketedPaste
-      ? `\u001b[200~${data}\u001b[201~`
-      : data;
-    return this.send(payload);
+    if (!this.sessionId || this.state !== 'connected') {
+      return Promise.reject(new Error('The terminal is not connected.'));
+    }
+    return this.client.pasteSession(this.sessionId, data).catch(error => {
+      this.setError(messageFrom(error));
+      throw error;
+    });
   }
 
   sendMouseTap(column: number, row: number) {
     if (!this.mouseTracking) {
       return Promise.resolve(false);
     }
-    return this.send(terminalMouseTapSequence(column, row)).then(() => true);
+    return this.client.sendTerminalMouseTap(this.sessionId, column, row);
+  }
+
+  sendMouseEvent(
+    column: number,
+    row: number,
+    action: 'press' | 'motion' | 'release'
+  ) {
+    if (
+      (!this.mouseTracking && action !== 'release')
+      || !this.sessionId
+      || this.state !== 'connected'
+    ) {
+      return Promise.resolve(false);
+    }
+    return this.client.sendTerminalMouseEvent(
+      this.sessionId,
+      column,
+      row,
+      action
+    );
   }
 
   sendMouseScroll(column: number, row: number, direction: 'up' | 'down', steps: number) {
     if (!this.mouseTracking) {
       return Promise.resolve(false);
     }
-    return this.send(terminalMouseScrollSequence(column, row, direction, steps)).then(() => true);
+    return this.client.sendTerminalMouseScroll(
+      this.sessionId,
+      column,
+      row,
+      direction,
+      steps
+    );
   }
 
   resize(columns: number, rows: number) {
@@ -206,6 +248,7 @@ class TerminalSessionManager {
       this.state = 'connected';
       this.error = '';
       this.publish();
+      void this.client.sendTerminalFocus(session.id, true).catch(() => undefined);
     } catch (error) {
       if (attempt !== this.connectionAttempt) return;
       this.sessionId = '';
@@ -234,6 +277,7 @@ class TerminalSessionManager {
       this.state = 'connected';
       this.error = '';
       this.publish();
+      void this.client.sendTerminalFocus(sessionId, true).catch(() => undefined);
     } catch {
       if (this.sessionId !== sessionId) return;
       await this.connect('resume');
@@ -267,6 +311,7 @@ class TerminalSessionManager {
     if (typeof output.bracketedPaste === 'boolean') {
       this.bracketedPaste = output.bracketedPaste;
     }
+    if (typeof output.title === 'string') this.terminalTitle = output.title;
     if (output.truncated) {
       this.lastSequence = 0;
       this.resetTerminalState();
@@ -321,6 +366,9 @@ class TerminalSessionManager {
     this.previousAppState = nextState;
     if (!isAppActive(nextState)) {
       if (wasActive) this.resumePending = true;
+      if (wasActive && this.sessionId && this.state === 'connected') {
+        void this.client.sendTerminalFocus(this.sessionId, false).catch(() => undefined);
+      }
       return;
     }
     if (!this.resumePending) return;
@@ -332,6 +380,7 @@ class TerminalSessionManager {
     this.alternateScreen = false;
     this.mouseTracking = false;
     this.bracketedPaste = false;
+    this.terminalTitle = '';
     this.fallbackText = '';
   }
 
@@ -345,6 +394,7 @@ class TerminalSessionManager {
     if (typeof event.bracketedPaste === 'boolean') {
       this.bracketedPaste = event.bracketedPaste;
     }
+    if (typeof event.title === 'string') this.terminalTitle = event.title;
   }
 
   private setError(error: string) {

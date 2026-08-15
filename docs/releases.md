@@ -25,21 +25,24 @@ and iOS `buildNumber` on each build.
 | `v1.X.Y` | `production` | Store-signed AAB | App Store archive |
 | `v1.X.Y-beta.N` | `beta` | Store-signed AAB; submitted to Play Open testing | App Store archive; submitted to TestFlight |
 
-The workflow waits for both platform builds. A failed Android or iOS archive
-fails the GitHub Actions run. The EAS JSON results are uploaded as a workflow
-artifact and the EAS build links are added to the job summary. For beta tags,
-the completed Android build is then submitted to Google Play's `beta` track,
-which is the Open testing track.
+After shared source validation, Android and iOS run as independent sibling jobs.
+They start concurrently, neither job depends on the other, and one platform's
+failure does not cancel or skip the other platform. The overall workflow still
+reports failure when either job fails. Each job uploads its own EAS JSON result
+as a workflow artifact. For beta tags, the completed Android build is submitted
+to Google Play's `beta` track, which is the Open testing track.
 
-Before continuing to iOS or submitting Android, the workflow downloads the
-exact AAB produced by EAS and checks it with
+Before submitting Android, its job downloads the exact AAB produced by EAS and
+checks it with
 `scripts/verify-android-native-libs.sh`. A release fails if the Go bridge is
 missing from any AAB ABI or if any 64-bit native library is not aligned for
 16 KB memory pages. The EAS pre-install hook pins Go 1.26.4 and builds the Go
 bridge and the pinned Ghostty terminal JNI library for `armeabi-v7a`,
 `arm64-v8a`, `x86`, and `x86_64`. Both native layers pass the required 16 KB
 linker alignment; the completed AAB is checked rather than trusting an
-intermediate archive.
+intermediate archive. The iOS job builds Ghostty with Homebrew's versioned
+`zig@0.15` bottle to avoid the upstream macOS archive linker failure on current
+Xcode workers.
 
 Stable tags create builds without submitting them. Beta tags submit Android to
 Google Play Open testing and upload iOS to TestFlight, but do not submit the iOS

@@ -12,19 +12,13 @@ zig_dir="${tools_dir}/zig"
 ghostty_dir="${tools_dir}/ghostty-${ghostty_revision}"
 global_cache_dir="${tools_dir}/zig-global-cache"
 
-case "$(uname -s)-$(uname -m)" in
+host_platform="$(uname -s)-$(uname -m)"
+case "${host_platform}" in
   Linux-x86_64)
     zig_archive="zig-x86_64-linux-${zig_version}.tar.xz"
     zig_sha256="02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239"
     ;;
-  Darwin-arm64)
-    zig_archive="zig-aarch64-macos-${zig_version}.tar.xz"
-    zig_sha256="3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b"
-    ;;
-  Darwin-x86_64)
-    zig_archive="zig-x86_64-macos-${zig_version}.tar.xz"
-    zig_sha256="375b6909fc1495d16fc2c7db9538f707456bfc3373b14ee83fdd3e22b3d43f7f"
-    ;;
+  Darwin-arm64|Darwin-x86_64) ;;
   *)
     echo "Unsupported Ghostty build host: $(uname -s) $(uname -m)" >&2
     exit 1
@@ -33,7 +27,27 @@ esac
 
 mkdir -p "${tools_dir}" "${global_cache_dir}"
 
-if [[ ! -x "${zig_dir}/zig" ]] || [[ "$("${zig_dir}/zig" version 2>/dev/null || true)" != "${zig_version}" ]]; then
+zig="${TELEMOB_ZIG:-}"
+if [[ -n "${zig}" ]]; then
+  if [[ ! -x "${zig}" ]]; then
+    echo "TELEMOB_ZIG is not executable: ${zig}" >&2
+    exit 1
+  fi
+elif [[ "${host_platform}" == Darwin-* ]]; then
+  # Homebrew's versioned formula carries the Zig 0.15 Mach-O/TBD fixes needed
+  # by current Xcode 26 SDKs. The unpatched upstream archive can fail before
+  # Ghostty starts building with unresolved macOS system symbols.
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "Homebrew and its zig@0.15 formula are required for iOS builds." >&2
+    exit 1
+  fi
+  zig_prefix="$(brew --prefix zig@0.15 2>/dev/null || true)"
+  zig="${zig_prefix}/bin/zig"
+  if [[ -z "${zig_prefix}" ]] || [[ ! -x "${zig}" ]]; then
+    echo "zig@0.15 is required. Install it with: brew install zig@0.15" >&2
+    exit 1
+  fi
+elif [[ ! -x "${zig_dir}/zig" ]] || [[ "$("${zig_dir}/zig" version 2>/dev/null || true)" != "${zig_version}" ]]; then
   archive_path="${tools_dir}/${zig_archive}"
   unpack_dir="$(mktemp -d "${TMPDIR:-/tmp}/telemob-zig.XXXXXX")"
   trap 'rm -rf "${unpack_dir}"' EXIT
@@ -56,7 +70,13 @@ if [[ ! -x "${zig_dir}/zig" ]] || [[ "$("${zig_dir}/zig" version 2>/dev/null || 
   rmdir "${unpack_dir}"
 fi
 
-zig="${zig_dir}/zig"
+if [[ -z "${zig}" ]]; then
+  zig="${zig_dir}/zig"
+fi
+if [[ "$("${zig}" version 2>/dev/null || true)" != "${zig_version}" ]]; then
+  echo "Ghostty ${ghostty_revision} requires Zig ${zig_version}; found $("${zig}" version 2>/dev/null || echo unknown)." >&2
+  exit 1
+fi
 
 if [[ ! -d "${ghostty_dir}/.git" ]]; then
   rm -rf "${ghostty_dir}"

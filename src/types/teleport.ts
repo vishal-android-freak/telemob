@@ -65,6 +65,8 @@ export type TerminalEvent =
       alternateScreen?: boolean;
       mouseTracking?: boolean;
       bracketedPaste?: boolean;
+      title?: string;
+      bellCount?: number;
     }
   | { type: 'closed'; sessionId: string; reason?: string }
   | { type: 'error'; sessionId: string; message: string };
@@ -78,6 +80,7 @@ export type TerminalOutputSnapshot = {
   alternateScreen?: boolean;
   mouseTracking?: boolean;
   bracketedPaste?: boolean;
+  title?: string;
   reason?: string;
   error?: string;
 };

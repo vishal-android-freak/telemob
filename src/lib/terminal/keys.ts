@@ -100,6 +100,17 @@ export function terminalMouseTapSequence(column: number, row: number) {
   return `\u001b[<0;${x};${y}M\u001b[<0;${x};${y}m`;
 }
 
+export function terminalMouseEventSequence(
+  column: number,
+  row: number,
+  action: 'press' | 'motion' | 'release'
+) {
+  const x = Math.max(1, Math.floor(column));
+  const y = Math.max(1, Math.floor(row));
+  if (action === 'release') return `\u001b[<0;${x};${y}m`;
+  return `\u001b[<${action === 'motion' ? 32 : 0};${x};${y}M`;
+}
+
 export function terminalMouseScrollSequence(
   column: number,
   row: number,

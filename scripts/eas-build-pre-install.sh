@@ -25,10 +25,24 @@ case "${platform}" in
     export GOTOOLCHAIN=local
     ;;
   ios)
+    brew_formulas=()
     if ! command -v go >/dev/null 2>&1; then
-      export HOMEBREW_NO_AUTO_UPDATE=1
-      brew install go
+      brew_formulas+=(go)
     fi
+
+    zig_prefix="$(brew --prefix zig@0.15 2>/dev/null || true)"
+    if [[ -z "${zig_prefix}" ]] || [[ ! -x "${zig_prefix}/bin/zig" ]]; then
+      brew_formulas+=(zig@0.15)
+    fi
+
+    if [[ "${#brew_formulas[@]}" -gt 0 ]]; then
+      export HOMEBREW_NO_AUTO_UPDATE=1
+      export HOMEBREW_NO_INSTALL_CLEANUP=1
+      brew install "${brew_formulas[@]}"
+    fi
+
+    zig_prefix="$(brew --prefix zig@0.15)"
+    export TELEMOB_ZIG="${zig_prefix}/bin/zig"
     ;;
   *)
     echo "Skipping gomobile bindings for unsupported EAS platform: ${platform:-unset}"

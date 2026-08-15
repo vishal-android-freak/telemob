@@ -1,9 +1,11 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Alert,
   type GestureResponderEvent,
   Keyboard,
   LayoutChangeEvent,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -26,8 +28,6 @@ import { getResponsiveLayout } from '@/lib/layout/responsive';
 import { readClipboardText } from '@/lib/platform/clipboard';
 import {
   TERMINAL_KEYS,
-  terminalKeySequence,
-  terminalTextSequence,
   type TerminalModifiers,
 } from '@/lib/terminal/keys';
 import { getTerminalSessionManager } from '@/lib/terminal/session-manager';
@@ -41,6 +41,7 @@ const INITIAL_FONT_METRICS = {
   lineHeight: SHELL_TERMINAL_FONT_SIZE * TERMINAL_LINE_HEIGHT_RATIO,
 };
 const TERMINAL_TAP_SLOP = 8;
+const TERMINAL_SELECTION_HOLD_MS = 450;
 
 export default function TerminalScreen() {
   const router = useRouter();
@@ -59,6 +60,9 @@ export default function TerminalScreen() {
   const [fontMetrics, setFontMetrics] = useState(INITIAL_FONT_METRICS);
   const [command, setCommand] = useState('');
   const [lineMode, setLineMode] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchStatus, setSearchStatus] = useState('');
   const [disconnecting, setDisconnecting] = useState(false);
   const [modifiers, setModifiers] = useState<TerminalModifiers>({ ctrl: false, alt: false });
   const modifiersRef = useRef<TerminalModifiers>({ ctrl: false, alt: false });
@@ -69,6 +73,7 @@ export default function TerminalScreen() {
   const directInputFocusedRef = useRef(false);
   const keyboardVisibleRef = useRef(Keyboard.isVisible());
   const lineInputRef = useRef<TextInput>(null);
+  const searchInputRef = useRef<TextInput>(null);
   const terminalViewportRef = useRef<View>(null);
   const viewportSizeRef = useRef<{ width: number; height: number } | null>(null);
   const sawActiveSessionRef = useRef(false);
@@ -81,6 +86,14 @@ export default function TerminalScreen() {
     handled: false,
     moved: false,
   });
+  const selectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const selectionActiveRef = useRef(false);
+  const selectionAnchorRef = useRef<{ column: number; row: number } | null>(null);
+  const selectionEndRef = useRef<{ column: number; row: number } | null>(null);
+  const remoteDragActiveRef = useRef(false);
+  const remoteDragGestureRef = useRef(0);
+  const remoteMouseLastCellRef = useRef<{ column: number; row: number } | null>(null);
+  const remoteMouseWriteRef = useRef<Promise<void>>(Promise.resolve());
   const connected = session.state === 'connected';
 
   useEffect(() => {
@@ -115,6 +128,10 @@ export default function TerminalScreen() {
       shown.remove();
       hidden.remove();
     };
+  }, []);
+
+  useEffect(() => () => {
+    if (selectionTimerRef.current) clearTimeout(selectionTimerRef.current);
   }, []);
 
   useEffect(() => {
@@ -192,19 +209,16 @@ export default function TerminalScreen() {
 
   async function submitCommand() {
     if (!connected || !command) return;
-    const value = `${command}\r`;
+    const value = command;
     setCommand('');
-    await manager.send(value).catch(() => undefined);
-  }
-
-  function sendRaw(value: string) {
-    if (!connected) return;
-    void manager.send(value).catch(() => undefined);
+    await manager.sendKey('text', value).catch(() => undefined);
+    await manager.sendKey('enter').catch(() => undefined);
   }
 
   function sendTerminalKey(key: string) {
-    const sequence = terminalKeySequence(key, modifiersRef.current);
-    if (sequence) sendRaw(sequence);
+    if (connected) {
+      void manager.sendKey(key, '', modifiersRef.current).catch(() => undefined);
+    }
     releaseModifiers();
   }
 
@@ -216,8 +230,9 @@ export default function TerminalScreen() {
     const insertedText = nextText.startsWith(previousText)
       ? nextText.slice(previousText.length)
       : nextText.slice(Math.min(previousText.length, nextText.length));
-    const sequence = terminalTextSequence(insertedText, modifiersRef.current);
-    if (sequence) sendRaw(sequence);
+    if (insertedText) {
+      void manager.sendKey('text', insertedText, modifiersRef.current).catch(() => undefined);
+    }
     releaseModifiers();
 
     // A retained TextInput lets Android IMEs rewrite their entire composing
@@ -251,6 +266,7 @@ export default function TerminalScreen() {
 
   function startTerminalTouch(event: GestureResponderEvent) {
     const { pageX, pageY } = event.nativeEvent;
+    const gesture = ++remoteDragGestureRef.current;
     terminalTouchRef.current = {
       pageX,
       pageY,
@@ -259,6 +275,25 @@ export default function TerminalScreen() {
       handled: false,
       moved: false,
     };
+    selectionActiveRef.current = false;
+    remoteDragActiveRef.current = false;
+    remoteMouseLastCellRef.current = null;
+    selectionAnchorRef.current = null;
+    selectionEndRef.current = null;
+    if (selectionTimerRef.current) clearTimeout(selectionTimerRef.current);
+    selectionTimerRef.current = setTimeout(() => {
+      selectionTimerRef.current = null;
+      if (terminalTouchRef.current.moved || !connected) return;
+      if (session.mouseTracking) {
+        remoteDragActiveRef.current = true;
+        dismissTerminalKeyboard();
+        sendRemoteMouseEvent('press', pageX, pageY, gesture);
+        return;
+      }
+      selectionActiveRef.current = true;
+      dismissTerminalKeyboard();
+      updateTerminalSelection(pageX, pageY, true);
+    }, TERMINAL_SELECTION_HOLD_MS);
   }
 
   function moveTerminalTouch(event: GestureResponderEvent) {
@@ -271,41 +306,103 @@ export default function TerminalScreen() {
       || Math.abs(pageY - touch.pageY) > TERMINAL_TAP_SLOP
     ) {
       touch.moved = true;
+      if (!selectionActiveRef.current && selectionTimerRef.current) {
+        clearTimeout(selectionTimerRef.current);
+        selectionTimerRef.current = null;
+      }
     }
+    if (remoteDragActiveRef.current) {
+      sendRemoteMouseEvent('motion', pageX, pageY, remoteDragGestureRef.current);
+      return;
+    }
+    if (selectionActiveRef.current) updateTerminalSelection(pageX, pageY, false);
   }
 
   function finishTerminalTouch() {
     const touch = terminalTouchRef.current;
     if (touch.handled) return;
     touch.handled = true;
+    if (selectionTimerRef.current) {
+      clearTimeout(selectionTimerRef.current);
+      selectionTimerRef.current = null;
+    }
+    if (remoteDragActiveRef.current) {
+      sendRemoteMouseEvent(
+        'release',
+        touch.lastPageX,
+        touch.lastPageY,
+        remoteDragGestureRef.current
+      );
+      remoteDragActiveRef.current = false;
+      touch.moved = false;
+      return;
+    }
+    if (selectionActiveRef.current) {
+      updateTerminalSelection(touch.lastPageX, touch.lastPageY, false);
+      selectionActiveRef.current = false;
+      touch.moved = false;
+      return;
+    }
     if (touch.moved && connected) {
+      void nativeTerminalRef.current?.clearSelection();
       sendTerminalScroll(touch);
     } else if (connected) {
+      void nativeTerminalRef.current?.clearSelection();
       sendTerminalTap(touch.pageX, touch.pageY);
-      if (
-        !lineMode
-        && !keyboardVisibleRef.current
-        && !directInputFocusedRef.current
-      ) {
-        directInputRef.current?.focus();
-      }
     }
     touch.moved = false;
   }
 
+  function updateTerminalSelection(pageX: number, pageY: number, begin: boolean) {
+    terminalViewportRef.current?.measureInWindow((viewportX, viewportY, width, height) => {
+      if (
+        dimensions.columns < 1
+        || dimensions.rows < 1
+        || width < 1
+        || height < 1
+      ) {
+        return;
+      }
+      const column = Math.min(
+        dimensions.columns,
+        Math.max(1, Math.floor((pageX - viewportX) * dimensions.columns / width) + 1)
+      );
+      const row = Math.min(
+        dimensions.rows,
+        Math.max(1, Math.floor((pageY - viewportY) * dimensions.rows / height) + 1)
+      );
+      if (begin || !selectionAnchorRef.current) {
+        selectionAnchorRef.current = { column, row };
+      }
+      const anchor = selectionAnchorRef.current;
+      const previous = selectionEndRef.current;
+      if (previous?.column === column && previous.row === row) return;
+      selectionEndRef.current = { column, row };
+      void nativeTerminalRef.current?.selectRange(
+        anchor.column,
+        anchor.row,
+        column,
+        row
+      );
+    });
+  }
+
   function sendTerminalScroll(touch: typeof terminalTouchRef.current) {
-    terminalViewportRef.current?.measureInWindow((viewportX, viewportY) => {
-      const cellWidth = fontMetrics.fontSize * TERMINAL_CELL_WIDTH_RATIO;
+    terminalViewportRef.current?.measureInWindow((viewportX, viewportY, width, height) => {
       const x = touch.lastPageX - viewportX;
       const y = touch.lastPageY - viewportY;
-      if (x < 0 || y < 0 || cellWidth <= 0 || fontMetrics.lineHeight <= 0) return;
+      if (
+        x < 0 || y < 0 || width < 1 || height < 1
+        || dimensions.columns < 1 || dimensions.rows < 1
+      ) return;
 
-      const column = Math.floor(x / cellWidth) + 1;
-      const row = Math.floor(y / fontMetrics.lineHeight) + 1;
+      const rowHeight = height / dimensions.rows;
+      const column = Math.floor(x * dimensions.columns / width) + 1;
+      const row = Math.floor(y * dimensions.rows / height) + 1;
       if (column > dimensions.columns || row > dimensions.rows) return;
 
       const deltaY = touch.lastPageY - touch.pageY;
-      const steps = Math.min(8, Math.max(1, Math.round(Math.abs(deltaY) / fontMetrics.lineHeight)));
+      const steps = Math.min(8, Math.max(1, Math.round(Math.abs(deltaY) / rowHeight)));
       const direction = deltaY > 0 ? 'up' : 'down';
       void manager.sendMouseScroll(column, row, direction, steps)
         .then(sent => {
@@ -317,18 +414,85 @@ export default function TerminalScreen() {
     });
   }
 
-  function sendTerminalTap(pageX: number, pageY: number) {
-    terminalViewportRef.current?.measureInWindow((viewportX, viewportY) => {
+  function sendRemoteMouseEvent(
+    action: 'press' | 'motion' | 'release',
+    pageX: number,
+    pageY: number,
+    gesture: number
+  ) {
+    terminalViewportRef.current?.measureInWindow((viewportX, viewportY, width, height) => {
+      if (gesture !== remoteDragGestureRef.current) return;
       const x = pageX - viewportX;
       const y = pageY - viewportY;
-      const cellWidth = fontMetrics.fontSize * TERMINAL_CELL_WIDTH_RATIO;
-      if (x < 0 || y < 0 || cellWidth <= 0 || fontMetrics.lineHeight <= 0) return;
+      if (
+        x < 0 || y < 0 || width < 1 || height < 1
+        || dimensions.columns < 1 || dimensions.rows < 1
+      ) return;
 
-      const column = Math.floor(x / cellWidth) + 1;
-      const row = Math.floor(y / fontMetrics.lineHeight) + 1;
+      const column = Math.floor(x * dimensions.columns / width) + 1;
+      const row = Math.floor(y * dimensions.rows / height) + 1;
       if (column > dimensions.columns || row > dimensions.rows) return;
-      void manager.sendMouseTap(column, row).catch(() => undefined);
+      const previous = remoteMouseLastCellRef.current;
+      if (action === 'motion' && previous?.column === column && previous.row === row) return;
+      remoteMouseLastCellRef.current = action === 'release' ? null : { column, row };
+      remoteMouseWriteRef.current = remoteMouseWriteRef.current
+        .then(() => manager.sendMouseEvent(column, row, action))
+        .then(() => undefined)
+        .catch(() => undefined);
     });
+  }
+
+  function sendTerminalTap(pageX: number, pageY: number) {
+    terminalViewportRef.current?.measureInWindow((viewportX, viewportY, width, height) => {
+      const x = pageX - viewportX;
+      const y = pageY - viewportY;
+      if (
+        x < 0 || y < 0 || width < 1 || height < 1
+        || dimensions.columns < 1 || dimensions.rows < 1
+      ) return;
+
+      const column = Math.floor(x * dimensions.columns / width) + 1;
+      const row = Math.floor(y * dimensions.rows / height) + 1;
+      if (column > dimensions.columns || row > dimensions.rows) return;
+      if (session.mouseTracking) {
+        void manager.sendMouseTap(column, row).catch(() => undefined);
+        return;
+      }
+      void nativeTerminalRef.current?.hyperlinkAt(column, row)
+        .then(uri => {
+          if (!uri || !/^https?:\/\//i.test(uri)) {
+            focusDirectTerminalInput();
+            return manager.sendMouseTap(column, row).then(() => undefined);
+          }
+          Alert.alert(
+            'Open terminal link?',
+            uri,
+            [
+              { text: 'Cancel', style: 'cancel' },
+              {
+                text: 'Open',
+                onPress: () => {
+                  void Linking.openURL(uri).catch(() => undefined);
+                },
+              },
+            ]
+          );
+          return undefined;
+        })
+        .catch(() => {
+          focusDirectTerminalInput();
+        });
+    });
+  }
+
+  function focusDirectTerminalInput() {
+    if (
+      !lineMode
+      && !keyboardVisibleRef.current
+      && !directInputFocusedRef.current
+    ) {
+      directInputRef.current?.focus();
+    }
   }
 
   async function disconnectTerminal() {
@@ -352,6 +516,34 @@ export default function TerminalScreen() {
       // terminal focused so the standard keyboard paste action remains usable.
       directInputRef.current?.focus();
     }
+  }
+
+  async function copyTerminalSelection() {
+    await nativeTerminalRef.current?.copySelection().catch(() => false);
+  }
+
+  async function findTerminalText(backwards: boolean) {
+    const query = searchQuery.trim();
+    if (!query) return;
+    const found = await nativeTerminalRef.current
+      ?.findText(query, backwards)
+      .catch(() => false);
+    setSearchStatus(found ? '' : 'No match');
+  }
+
+  function toggleSearch() {
+    setSearchOpen(value => {
+      const next = !value;
+      setSearchStatus('');
+      if (next) {
+        dismissTerminalKeyboard();
+        setTimeout(() => searchInputRef.current?.focus(), 0);
+      } else {
+        searchInputRef.current?.blur();
+        void nativeTerminalRef.current?.clearSelection();
+      }
+      return next;
+    });
   }
 
   function toggleLineMode() {
@@ -394,7 +586,9 @@ export default function TerminalScreen() {
             </Pressable>
             <View style={styles.target}>
               <Text numberOfLines={1} style={styles.targetText}>
-                <Text style={styles.login}>{params.login}@</Text>{params.hostname}
+                {session.terminalTitle || (
+                  <><Text style={styles.login}>{params.login}@</Text>{params.hostname}</>
+                )}
               </Text>
             </View>
             <View style={styles.headerActions}>
@@ -427,6 +621,21 @@ export default function TerminalScreen() {
             ref={terminalViewportRef}
             onLayout={resizeTerminal}
             onTouchCancel={() => {
+              if (selectionTimerRef.current) {
+                clearTimeout(selectionTimerRef.current);
+                selectionTimerRef.current = null;
+              }
+              if (remoteDragActiveRef.current) {
+                const touch = terminalTouchRef.current;
+                sendRemoteMouseEvent(
+                  'release',
+                  touch.lastPageX,
+                  touch.lastPageY,
+                  remoteDragGestureRef.current
+                );
+                remoteDragActiveRef.current = false;
+              }
+              selectionActiveRef.current = false;
               terminalTouchRef.current.moved = true;
             }}
             onTouchEnd={finishTerminalTouch}
@@ -469,7 +678,7 @@ export default function TerminalScreen() {
                 if (event.nativeEvent.key === 'Backspace') sendTerminalKey('backspace');
               }}
               onSubmitEditing={() => {
-                sendRaw('\r');
+                sendTerminalKey('enter');
                 resetDirectInput();
               }}
               returnKeyType="send"
@@ -480,6 +689,49 @@ export default function TerminalScreen() {
           </View>
 
           <View style={styles.inputDock}>
+            {searchOpen ? (
+              <View style={styles.searchRow}>
+                <Text style={styles.searchPrompt}>FIND</Text>
+                <TextInput
+                  ref={searchInputRef}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardAppearance="dark"
+                  onChangeText={value => {
+                    setSearchQuery(value);
+                    setSearchStatus('');
+                  }}
+                  onSubmitEditing={() => findTerminalText(false)}
+                  placeholder="search terminal buffer"
+                  placeholderTextColor={palette.quiet}
+                  returnKeyType="search"
+                  selectionColor={palette.copper}
+                  spellCheck={false}
+                  style={styles.searchInput}
+                  submitBehavior="submit"
+                  value={searchQuery}
+                />
+                {searchStatus ? <Text style={styles.searchStatus}>{searchStatus}</Text> : null}
+                <UtilityKey
+                  accessibilityLabel="Previous search result"
+                  dense
+                  label="↑"
+                  onPress={() => findTerminalText(true)}
+                />
+                <UtilityKey
+                  accessibilityLabel="Next search result"
+                  dense
+                  label="↓"
+                  onPress={() => findTerminalText(false)}
+                />
+                <UtilityKey
+                  accessibilityLabel="Close terminal search"
+                  dense
+                  label="×"
+                  onPress={toggleSearch}
+                />
+              </View>
+            ) : null}
             <ScrollView
               contentContainerStyle={[
                 styles.keyRail,
@@ -512,6 +764,8 @@ export default function TerminalScreen() {
                 onPress={() => toggleModifier('alt')}
               />
               <UtilityKey dense={layout.shortViewport} label="PASTE" onPress={pasteClipboard} wide />
+              <UtilityKey dense={layout.shortViewport} label="COPY" onPress={copyTerminalSelection} wide />
+              <UtilityKey active={searchOpen} dense={layout.shortViewport} label="FIND" onPress={toggleSearch} wide />
               <UtilityKey active={lineMode} dense={layout.shortViewport} label="LINE" onPress={toggleLineMode} wide />
               {TERMINAL_KEYS.map(key => (
                 <UtilityKey
@@ -668,6 +922,27 @@ const styles = StyleSheet.create({
   },
   errorText: { color: palette.warning, fontFamily: type.monoMedium, fontSize: 10, lineHeight: 14 },
   inputDock: { borderTopColor: palette.rule, borderTopWidth: StyleSheet.hairlineWidth, backgroundColor: palette.deep },
+  searchRow: {
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    borderBottomColor: palette.rule,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 3,
+  },
+  searchPrompt: { color: palette.copper, fontFamily: type.monoStrong, fontSize: 9 },
+  searchInput: {
+    flex: 1,
+    minWidth: 0,
+    height: 32,
+    color: palette.porcelain,
+    fontFamily: type.mono,
+    fontSize: 11,
+    paddingHorizontal: space.xs,
+    paddingVertical: 0,
+  },
+  searchStatus: { color: palette.warning, fontFamily: type.monoMedium, fontSize: 8 },
   keyRail: { minHeight: 38, alignItems: 'stretch', paddingHorizontal: 3, gap: 3 },
   keyRailShort: { minHeight: 32 },
   keyRailWide: { flexGrow: 1, justifyContent: 'center' },

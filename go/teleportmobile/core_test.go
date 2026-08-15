@@ -1,12 +1,20 @@
 package teleportmobile
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
 )
 
-type recordingSink struct{ events []string }
+type recordingSink struct {
+	events []string
+	data   [][]byte
+}
+
+func (s *recordingSink) OnTerminalData(_ string, _ int64, data []byte) {
+	s.data = append(s.data, append([]byte(nil), data...))
+}
 
 func (s *recordingSink) OnTerminalEvent(eventJSON string) {
 	s.events = append(s.events, eventJSON)
@@ -55,7 +63,7 @@ func TestTOTPLoginAndShellLifecycle(t *testing.T) {
 	if err := core.WriteSession(session.ID, "whoami\n"); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(sink.events, "\n"); !strings.Contains(got, "ubuntu") {
+	if got := string(bytes.Join(sink.data, nil)); !strings.Contains(got, "ubuntu") {
 		t.Fatalf("expected terminal output, got %s", got)
 	}
 }
@@ -113,9 +121,9 @@ func TestProductionCoreReviewerLoginAndRestore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	events := strings.Join(sink.events, "\n")
-	if !strings.Contains(events, "ubuntu") || strings.Contains(events, "development driver: w") {
-		t.Fatalf("reviewer terminal did not accumulate direct input: %s", events)
+	terminalData := string(bytes.Join(sink.data, nil))
+	if !strings.Contains(terminalData, "ubuntu") || strings.Contains(terminalData, "development driver: w") {
+		t.Fatalf("reviewer terminal did not accumulate direct input: %s", terminalData)
 	}
 
 	snapshotJSON, err := core.ExportSessionJSON()
@@ -215,8 +223,27 @@ func TestTerminalOutputIsSequencedAndReplayable(t *testing.T) {
 	if snapshot.Open || snapshot.LatestSequence != 2 || snapshot.Reason != "done" {
 		t.Fatalf("unexpected output snapshot: %#v", snapshot)
 	}
-	if len(snapshot.Chunks) != 1 || snapshot.Chunks[0].Sequence != 2 || snapshot.Chunks[0].Data != "two" {
+	if len(snapshot.Chunks) != 1 || snapshot.Chunks[0].Sequence != 2 ||
+		!bytes.Equal(snapshot.Chunks[0].Data, []byte("two")) {
 		t.Fatalf("unexpected replay chunks: %#v", snapshot.Chunks)
+	}
+}
+
+func TestTerminalDataBypassesJSONWithoutChangingBytes(t *testing.T) {
+	core := NewDevelopmentCore()
+	sink := &recordingSink{}
+	core.SetEventSink(sink)
+	core.prepareSessionOutput("session-test")
+	want := []byte{'a', 0xff, 0x00, 0x1b, 'b'}
+	core.emit(map[string]any{
+		"type": "data", "sessionId": "session-test", "data": string(want),
+	})
+
+	if len(sink.data) != 1 || !bytes.Equal(sink.data[0], want) {
+		t.Fatalf("terminal bytes changed: got %v want %v", sink.data, want)
+	}
+	if len(sink.events) != 1 || strings.Contains(sink.events[0], "Yf8") {
+		t.Fatalf("terminal payload leaked back through metadata JSON: %q", sink.events)
 	}
 }
 
