@@ -31,10 +31,11 @@ case "${platform}" in
     mkdir -p "${app_dir}/modules/expo-teleport/android/libs"
     (
       cd "${core_dir}"
-      # Android support is currently arm64-v8a only. Local device validation is
-      # performed on Pixel 10, and keeping the binding single-architecture
-      # prevents accidental fat APKs during this first public release line.
-      gomobile bind -target=android/arm64 -androidapi 24 \
+      # The Android App Bundle contains React Native libraries for every
+      # supported ABI. Build the Go bridge for the same complete set so Play
+      # cannot deliver an otherwise valid split APK without libgojni.so.
+      # gomobile's android target includes arm, arm64, 386, and amd64.
+      gomobile bind -target=android -androidapi 24 \
         -o "${app_dir}/modules/expo-teleport/android/libs/teleportmobile.aar" .
     )
     ;;

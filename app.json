@@ -3,13 +3,14 @@
     "name": "Telemob",
     "slug": "telemob",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "telemob",
     "userInterfaceStyle": "dark",
     "ios": {
       "icon": "./assets/images/icon.png",
       "bundleIdentifier": "com.naarang.telemob",
+      "supportsTablet": true,
       "config": {
         "usesNonExemptEncryption": false
       }
@@ -43,7 +44,8 @@
           "configureAndroidBackup": true,
           "faceIDPermission": "Use Face ID to unlock your Teleport credentials."
         }
-      ]
+      ],
+      "./plugins/with-google-play-compliance"
     ],
     "experiments": {
       "typedRoutes": true,

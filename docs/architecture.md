@@ -91,6 +91,13 @@ The PTY size is derived from the measured viewport. Ordinary shell screens use
 a compact font; alternate-screen TUIs use a larger font and receive the true
 resulting row and column count. There is no hard-coded 80- or 84-column PTY.
 
+Shared window breakpoints adapt every screen without checking a specific phone
+or tablet model. Login changes from one column to a split composition when
+space permits. Node discovery uses one, two, or three columns inside a bounded
+content width. On short landscape screens, terminal chrome becomes denser so
+the PTY retains as much height as possible. iOS and Android both permit runtime
+orientation changes, and iPad is an enabled native target.
+
 Touch taps and swipes become standard SGR mouse events only when xterm reports
 that the remote application enabled mouse tracking. Keyboard input otherwise
 passes through as terminal bytes. Ctrl and Alt are one-shot modifiers for the
@@ -139,7 +146,6 @@ Teleport proxy remains the source of truth for expiration and authorization.
 - File transfer, agent forwarding, port forwarding, and session joining.
 - Per-session MFA and native platform passkey association.
 - Indefinite iOS background execution.
-- Android ABIs other than `arm64-v8a`.
 
 See [Development](development.md) for build details and [Releases](releases.md)
 for the signed-build pipeline.

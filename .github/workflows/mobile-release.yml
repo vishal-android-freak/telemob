@@ -72,6 +72,21 @@ jobs:
             --wait \
             --json > eas-build-android.json
 
+      - name: Verify Android ABIs and 16 KB page alignment
+        run: |
+          telemob_android_url="$(node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const parsed = JSON.parse(readFileSync("eas-build-android.json", "utf8"));
+            const build = Array.isArray(parsed) ? parsed[0] : parsed;
+            const url = build.artifacts?.buildUrl ?? build.artifacts?.applicationArchiveUrl;
+            if (!url) throw new Error("The Android EAS build did not return an artifact URL.");
+            process.stdout.write(url);
+          ')"
+          curl --fail --location --silent --show-error \
+            "${telemob_android_url}" \
+            --output "${RUNNER_TEMP}/telemob.aab"
+          bash scripts/verify-android-native-libs.sh "${RUNNER_TEMP}/telemob.aab"
+
       - name: Build and submit iOS beta on EAS
         if: steps.release.outputs.prerelease == 'true'
         run: |

@@ -10,12 +10,14 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { palette, space, type } from '@/constants/tokens';
+import { getResponsiveLayout } from '@/lib/layout/responsive';
 import { readClipboardText } from '@/lib/platform/clipboard';
 import {
   TERMINAL_KEYS,
@@ -43,6 +45,10 @@ export default function TerminalScreen() {
     hostname: string;
     login: string;
   }>();
+  const { height: windowHeight, width: windowWidth } = useWindowDimensions();
+  const layout = getResponsiveLayout(windowWidth, windowHeight);
+  const [largeTerminal] = useState(layout.tablet);
+  const terminalPadding = layout.shortViewport ? 8 : TERMINAL_PADDING;
   const [manager] = useState(getTerminalSessionManager);
   const [session, setSession] = useState(manager.getSnapshot);
   const [dimensions, setDimensions] = useState({ columns: 0, rows: 0 });
@@ -125,11 +131,11 @@ export default function TerminalScreen() {
   }, [router, session.state]);
 
   const applyTerminalSize = useCallback((width: number, height: number, narrowTUI: boolean) => {
-    const availableWidth = Math.max(1, width - TERMINAL_PADDING * 2);
-    const availableHeight = Math.max(1, height - TERMINAL_PADDING * 2);
+    const availableWidth = Math.max(1, width - terminalPadding * 2);
+    const availableHeight = Math.max(1, height - terminalPadding * 2);
     const fontSize = narrowTUI
-      ? FULL_SCREEN_TERMINAL_FONT_SIZE
-      : SHELL_TERMINAL_FONT_SIZE;
+      ? FULL_SCREEN_TERMINAL_FONT_SIZE + (largeTerminal ? 1 : 0)
+      : SHELL_TERMINAL_FONT_SIZE + (largeTerminal ? 1 : 0);
     const cellWidth = fontSize * TERMINAL_CELL_WIDTH_RATIO;
     const lineHeight = fontSize * TERMINAL_LINE_HEIGHT_RATIO;
     const next = {
@@ -149,10 +155,11 @@ export default function TerminalScreen() {
     setDimensions(next);
     if (!current) setViewportReady(true);
     manager.resize(next.columns, next.rows);
-  }, [manager]);
+  }, [largeTerminal, manager, terminalPadding]);
 
   function resizeTerminal(event: LayoutChangeEvent) {
     const { width, height } = event.nativeEvent.layout;
+    if (width < 1 || height < 1) return;
     viewportSizeRef.current = { width, height };
     applyTerminalSize(width, height, session.alternateScreen);
   }
@@ -277,8 +284,8 @@ export default function TerminalScreen() {
   function sendTerminalScroll(touch: typeof terminalTouchRef.current) {
     terminalViewportRef.current?.measureInWindow((viewportX, viewportY) => {
       const cellWidth = fontMetrics.fontSize * TERMINAL_CELL_WIDTH_RATIO;
-      const x = touch.lastPageX - viewportX - TERMINAL_PADDING;
-      const y = touch.lastPageY - viewportY - TERMINAL_PADDING;
+      const x = touch.lastPageX - viewportX - terminalPadding;
+      const y = touch.lastPageY - viewportY - terminalPadding;
       if (x < 0 || y < 0 || cellWidth <= 0 || fontMetrics.lineHeight <= 0) return;
 
       const column = Math.floor(x / cellWidth) + 1;
@@ -294,8 +301,8 @@ export default function TerminalScreen() {
 
   function sendTerminalTap(pageX: number, pageY: number) {
     terminalViewportRef.current?.measureInWindow((viewportX, viewportY) => {
-      const x = pageX - viewportX - TERMINAL_PADDING;
-      const y = pageY - viewportY - TERMINAL_PADDING;
+      const x = pageX - viewportX - terminalPadding;
+      const y = pageY - viewportY - terminalPadding;
       const cellWidth = fontMetrics.fontSize * TERMINAL_CELL_WIDTH_RATIO;
       if (x < 0 || y < 0 || cellWidth <= 0 || fontMetrics.lineHeight <= 0) return;
 
@@ -353,15 +360,19 @@ export default function TerminalScreen() {
         style={styles.flex}
       >
         <View style={styles.shell}>
-          <View style={styles.header}>
+          <View style={[
+            styles.header,
+            layout.shortViewport && styles.headerShort,
+            layout.wide && styles.headerWide,
+          ]}>
             <Pressable
               accessibilityLabel="Back to nodes"
               accessibilityRole="button"
               hitSlop={12}
               onPress={() => router.back()}
-              style={styles.backButton}
+              style={[styles.backButton, layout.shortViewport && styles.backButtonShort]}
             >
-              <Text style={styles.back}>‹</Text>
+              <Text style={[styles.back, layout.shortViewport && styles.backShort]}>‹</Text>
             </Pressable>
             <View style={styles.target}>
               <Text numberOfLines={1} style={styles.targetText}>
@@ -407,7 +418,7 @@ export default function TerminalScreen() {
           >
             <ScrollView
               ref={scrollRef}
-              contentContainerStyle={styles.terminalContent}
+              contentContainerStyle={[styles.terminalContent, { padding: terminalPadding }]}
               keyboardDismissMode={
                 Platform.OS === 'ios' && !session.mouseTracking ? 'interactive' : 'none'
               }
@@ -548,7 +559,11 @@ export default function TerminalScreen() {
 
           <View style={styles.inputDock}>
             <ScrollView
-              contentContainerStyle={styles.keyRail}
+              contentContainerStyle={[
+                styles.keyRail,
+                layout.shortViewport && styles.keyRailShort,
+                layout.wide && styles.keyRailWide,
+              ]}
               horizontal
               keyboardShouldPersistTaps="always"
               showsHorizontalScrollIndicator={false}
@@ -556,26 +571,30 @@ export default function TerminalScreen() {
               {Platform.OS === 'ios' ? (
                 <UtilityKey
                   accessibilityLabel="Dismiss keyboard"
+                  dense={layout.shortViewport}
                   label="KB↓"
                   onPress={dismissTerminalKeyboard}
                 />
               ) : null}
               <UtilityKey
                 active={modifiers.ctrl}
+                dense={layout.shortViewport}
                 label="CTRL"
                 onPress={() => toggleModifier('ctrl')}
                 wide
               />
               <UtilityKey
                 active={modifiers.alt}
+                dense={layout.shortViewport}
                 label="ALT"
                 onPress={() => toggleModifier('alt')}
               />
-              <UtilityKey label="PASTE" onPress={pasteClipboard} wide />
-              <UtilityKey active={lineMode} label="LINE" onPress={toggleLineMode} wide />
+              <UtilityKey dense={layout.shortViewport} label="PASTE" onPress={pasteClipboard} wide />
+              <UtilityKey active={lineMode} dense={layout.shortViewport} label="LINE" onPress={toggleLineMode} wide />
               {TERMINAL_KEYS.map(key => (
                 <UtilityKey
                   key={key.key}
+                  dense={layout.shortViewport}
                   label={key.label}
                   onPress={() => sendTerminalKey(key.key)}
                   wide={key.wide}
@@ -584,7 +603,10 @@ export default function TerminalScreen() {
             </ScrollView>
 
             {lineMode ? (
-              <View style={styles.commandRow}>
+              <View style={[
+                styles.commandRow,
+                layout.shortViewport && styles.commandRowShort,
+              ]}>
                 <Text style={styles.prompt}>$</Text>
                 <TextInput
                   ref={lineInputRef}
@@ -635,12 +657,14 @@ function isActiveTerminalState(state: string) {
 function UtilityKey({
   active = false,
   accessibilityLabel,
+  dense = false,
   label,
   onPress,
   wide = false,
 }: {
   active?: boolean;
   accessibilityLabel?: string;
+  dense?: boolean;
   label: string;
   onPress: () => void;
   wide?: boolean;
@@ -654,11 +678,17 @@ function UtilityKey({
       style={({ pressed }) => [
         styles.key,
         wide && styles.keyWide,
+        dense && styles.keyDense,
+        dense && wide && styles.keyWideDense,
         active && styles.keyActive,
         pressed && styles.keyPressed,
       ]}
     >
-      <Text style={[styles.keyText, active && styles.keyTextActive]}>{label}</Text>
+      <Text style={[
+        styles.keyText,
+        dense && styles.keyTextDense,
+        active && styles.keyTextActive,
+      ]}>{label}</Text>
     </Pressable>
   );
 }
@@ -676,8 +706,12 @@ const styles = StyleSheet.create({
     backgroundColor: palette.deep,
     paddingHorizontal: space.sm,
   },
+  headerShort: { minHeight: 36, paddingHorizontal: space.xs },
+  headerWide: { paddingHorizontal: space.md },
   backButton: { width: 40, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center' },
+  backButtonShort: { width: 34 },
   back: { color: palette.copper, fontFamily: type.monoMedium, fontSize: 30, lineHeight: 32 },
+  backShort: { fontSize: 25, lineHeight: 27 },
   target: { flex: 1, minWidth: 0, alignItems: 'center' },
   targetText: { color: palette.porcelain, fontFamily: type.monoStrong, fontSize: 11 },
   login: { color: palette.quiet, fontFamily: type.mono },
@@ -697,7 +731,7 @@ const styles = StyleSheet.create({
   disconnectButtonPressed: { backgroundColor: palette.raised },
   disconnectText: { color: palette.danger, fontFamily: type.monoMedium, fontSize: 9 },
   terminalViewport: { flex: 1, backgroundColor: palette.terminal },
-  terminalContent: { padding: TERMINAL_PADDING, flexGrow: 1 },
+  terminalContent: { flexGrow: 1 },
   outputLine: {
     flexShrink: 0,
     overflow: 'hidden',
@@ -717,13 +751,19 @@ const styles = StyleSheet.create({
   errorText: { color: palette.warning, fontFamily: type.monoMedium, fontSize: 10, lineHeight: 14 },
   inputDock: { borderTopColor: palette.rule, borderTopWidth: StyleSheet.hairlineWidth, backgroundColor: palette.deep },
   keyRail: { minHeight: 38, alignItems: 'stretch', paddingHorizontal: 3, gap: 3 },
+  keyRailShort: { minHeight: 32 },
+  keyRailWide: { flexGrow: 1, justifyContent: 'center' },
   key: { width: 44, minHeight: 34, alignItems: 'center', justifyContent: 'center', borderColor: palette.rule, borderWidth: StyleSheet.hairlineWidth, backgroundColor: palette.panel },
   keyWide: { width: 58 },
+  keyDense: { width: 40, minHeight: 28 },
+  keyWideDense: { width: 52 },
   keyActive: { borderColor: palette.copper, backgroundColor: palette.copperMuted },
   keyPressed: { backgroundColor: palette.raised },
   keyText: { color: palette.mist, fontFamily: type.monoMedium, fontSize: 9 },
+  keyTextDense: { fontSize: 8 },
   keyTextActive: { color: palette.porcelain },
   commandRow: { minHeight: 46, flexDirection: 'row', alignItems: 'center', backgroundColor: palette.deep, paddingLeft: space.md },
+  commandRowShort: { minHeight: 38, paddingLeft: space.sm },
   prompt: { color: palette.copper, fontFamily: type.monoStrong, fontSize: 16 },
   command: { flex: 1, color: palette.porcelain, fontFamily: type.mono, fontSize: 13, paddingHorizontal: space.sm, paddingVertical: 0 },
   send: { alignSelf: 'stretch', minWidth: 48, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.copper },

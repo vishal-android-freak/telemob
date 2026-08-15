@@ -17,6 +17,7 @@ import {
   Panel,
 } from '@/components/shell-ui';
 import { palette, radius, space, type } from '@/constants/tokens';
+import { getResponsiveLayout, responsiveLayout } from '@/lib/layout/responsive';
 import { getTeleportClient } from '@/lib/teleport/client';
 import {
   clearProfile,
@@ -32,8 +33,9 @@ import type { AuthenticatedProfile, TeleportServer } from '@/types/teleport';
 
 export default function ServersScreen() {
   const router = useRouter();
-  const { width } = useWindowDimensions();
-  const compact = width <= 390;
+  const { height, width } = useWindowDimensions();
+  const layout = getResponsiveLayout(width, height);
+  const [listWidth, setListWidth] = useState(0);
   const [profile, setProfile] = useState<AuthenticatedProfile | null>(null);
   const [servers, setServers] = useState<TeleportServer[]>([]);
   const [query, setQuery] = useState('');
@@ -120,6 +122,12 @@ export default function ServersScreen() {
   const activeTarget = isActiveTerminalState(terminalSession.state)
     ? terminalSession.target
     : undefined;
+  const cardWidth = listWidth > 0
+    ? Math.floor(
+        (listWidth - responsiveLayout.nodeGap * (layout.nodeColumns - 1))
+          / layout.nodeColumns
+      )
+    : undefined;
 
   async function signOut() {
     await Promise.all([clearProfile(), getTeleportClient().logout()]);
@@ -135,7 +143,12 @@ export default function ServersScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={[styles.content, compact && styles.contentCompact]}>
+      <ScrollView contentContainerStyle={[
+        styles.content,
+        layout.compact && styles.contentCompact,
+        layout.shortViewport && styles.contentShort,
+      ]}>
+        <View style={styles.page}>
         <View style={styles.topline}>
           <View style={styles.identity}>
             <View style={styles.liveDot} />
@@ -149,7 +162,12 @@ export default function ServersScreen() {
           </Pressable>
         </View>
 
-        <Text style={[styles.title, compact && styles.titleCompact]}>
+        <Text style={[
+          styles.title,
+          layout.compact && styles.titleCompact,
+          layout.wide && styles.titleWide,
+          layout.shortViewport && styles.titleShort,
+        ]}>
           Choose the node for login
         </Text>
 
@@ -169,22 +187,29 @@ export default function ServersScreen() {
         {loading ? (
           <ActivityIndicator color={palette.copper} style={styles.loader} />
         ) : (
-          <View style={[styles.serverList, compact && styles.serverListCompact]}>
+          <View style={[styles.serverList, layout.compact && styles.serverListCompact]}>
             <Text style={styles.count}>{filtered.length} nodes available</Text>
-            {filtered.map(server => (
-              <ServerCard
-                activeLogin={activeTarget?.serverId === server.id ? activeTarget.login : undefined}
-                compact={compact}
-                key={server.id}
-                server={server}
-                onOpen={openServer}
-              />
-            ))}
+            <View
+              onLayout={event => setListWidth(event.nativeEvent.layout.width)}
+              style={styles.serverGrid}
+            >
+              {filtered.map(server => (
+                <ServerCard
+                  activeLogin={activeTarget?.serverId === server.id ? activeTarget.login : undefined}
+                  compact={layout.compact}
+                  key={server.id}
+                  server={server}
+                  width={cardWidth}
+                  onOpen={openServer}
+                />
+              ))}
+            </View>
             {!filtered.length && (
               <Notice>No nodes match this filter.</Notice>
             )}
           </View>
         )}
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -194,11 +219,13 @@ function ServerCard({
   activeLogin,
   compact,
   server,
+  width,
   onOpen,
 }: {
   activeLogin?: string;
   compact: boolean;
   server: TeleportServer;
+  width?: number;
   onOpen: (server: TeleportServer, login: string) => void;
 }) {
   return (
@@ -206,6 +233,7 @@ function ServerCard({
       styles.serverCard,
       compact && styles.serverCardCompact,
       activeLogin && styles.serverCardActive,
+      width ? { width } : styles.serverCardFull,
     ]}>
       <View style={styles.serverHeader}>
         <View style={styles.hostBlock}>
@@ -293,8 +321,10 @@ function isActiveTerminalState(state: TerminalConnectionState) {
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: palette.ink },
-  content: { padding: space.lg, paddingBottom: space.xxl, gap: space.lg },
-  contentCompact: { padding: space.md, paddingBottom: space.xl, gap: space.md },
+  content: { alignItems: 'center', padding: space.lg, paddingBottom: space.xxl },
+  contentCompact: { padding: space.md, paddingBottom: space.xl },
+  contentShort: { paddingVertical: space.md },
+  page: { width: '100%', maxWidth: responsiveLayout.contentMaxWidth, gap: space.lg },
   topline: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   identity: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flex: 1 },
   liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: palette.signal },
@@ -303,11 +333,15 @@ const styles = StyleSheet.create({
   signOut: { color: palette.copper, fontFamily: type.monoMedium, fontSize: 11 },
   title: { color: palette.porcelain, fontFamily: type.display, fontSize: 34, lineHeight: 38, letterSpacing: -0.6 },
   titleCompact: { fontSize: 30, lineHeight: 34 },
+  titleWide: { fontSize: 42, lineHeight: 46 },
+  titleShort: { fontSize: 30, lineHeight: 33 },
   loader: { marginVertical: space.xl },
   serverList: { gap: space.md },
   serverListCompact: { gap: 12 },
+  serverGrid: { width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: responsiveLayout.nodeGap, alignItems: 'flex-start' },
   count: { color: palette.quiet, fontFamily: type.mono, fontSize: 10, letterSpacing: 0.7, textTransform: 'uppercase' },
   serverCard: { gap: space.md },
+  serverCardFull: { width: '100%' },
   serverCardCompact: { gap: 14, padding: 14 },
   serverCardActive: { borderColor: palette.signal },
   serverHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: space.sm },

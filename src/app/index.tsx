@@ -6,6 +6,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -19,6 +20,7 @@ import {
   PrimaryButton,
 } from '@/components/shell-ui';
 import { palette, radius, space, type } from '@/constants/tokens';
+import { getResponsiveLayout, responsiveLayout } from '@/lib/layout/responsive';
 import { getTeleportClient } from '@/lib/teleport/client';
 import {
   clearProfile,
@@ -36,6 +38,8 @@ import type {
 export default function ConnectScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ reason?: string }>();
+  const { height, width } = useWindowDimensions();
+  const layout = getResponsiveLayout(width, height);
   const [proxyAddress, setProxyAddress] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -157,41 +161,66 @@ export default function ConnectScreen() {
         style={styles.flex}
       >
         <ScrollView
-          contentContainerStyle={styles.content}
+          contentContainerStyle={[
+            styles.content,
+            layout.compact && styles.contentCompact,
+            layout.shortViewport && styles.contentShort,
+          ]}
           keyboardShouldPersistTaps="handled"
         >
-          <View style={styles.masthead}>
-            <Image
-              accessibilityLabel="Telemob app icon"
-              source={require('../../assets/images/icon.png')}
-              style={styles.mark}
-            />
-            <View>
-              <Text style={styles.product}>Telemob</Text>
-              <Text style={styles.version}>mobile access / build 001</Text>
-            </View>
-          </View>
+          <View style={[
+            styles.layout,
+            layout.split && styles.layoutSplit,
+            layout.wide && styles.layoutWide,
+          ]}>
+            <View style={[styles.intro, layout.split && styles.introSplit]}>
+              <View style={styles.masthead}>
+                <Image
+                  accessibilityLabel="Telemob app icon"
+                  source={require('../../assets/images/icon.png')}
+                  style={styles.mark}
+                />
+                <View>
+                  <Text style={styles.product}>Telemob</Text>
+                  <Text style={styles.version}>mobile access / build 001</Text>
+                </View>
+              </View>
 
-          <View style={styles.hero}>
-            <Eyebrow>Identity checkpoint</Eyebrow>
-            <Text style={styles.title}>Your infrastructure, within reach.</Text>
-            <Text style={styles.subtitle}>
-              Enter the Teleport gateway you already trust. Credentials remain
-              on this device and expire with the cluster certificate.
-            </Text>
-          </View>
-
-          <View style={styles.form}>
-            <View>
-              <FieldLabel>Teleport gateway</FieldLabel>
-              <Field
-                value={proxyAddress}
-                onChangeText={setProxyAddress}
-                placeholder="teleport.example.com:443"
-                keyboardType="url"
-                textContentType="URL"
-              />
+              <View style={styles.hero}>
+                <Eyebrow>Identity checkpoint</Eyebrow>
+                <Text style={[
+                  styles.title,
+                  layout.compact && styles.titleCompact,
+                  layout.wide && styles.titleWide,
+                  layout.shortViewport && styles.titleShort,
+                ]}>
+                  Your infrastructure, within reach.
+                </Text>
+                <Text style={[
+                  styles.subtitle,
+                  layout.shortViewport && styles.subtitleShort,
+                ]}>
+                  Enter the Teleport gateway you already trust. Credentials remain
+                  on this device and expire with the cluster certificate.
+                </Text>
+              </View>
             </View>
+
+            <View style={[
+              styles.formColumn,
+              layout.split && styles.formColumnSplit,
+            ]}>
+              <View style={[styles.form, layout.shortViewport && styles.formShort]}>
+                <View>
+                  <FieldLabel>Teleport gateway</FieldLabel>
+                  <Field
+                    value={proxyAddress}
+                    onChangeText={setProxyAddress}
+                    placeholder="teleport.example.com:443"
+                    keyboardType="url"
+                    textContentType="URL"
+                  />
+                </View>
             <View>
               <FieldLabel>Username</FieldLabel>
               <Field
@@ -300,6 +329,8 @@ export default function ConnectScreen() {
               ? 'Development driver active. No password is written to storage.'
               : 'Native Go core active. Authentication and SSH traffic go directly between this device and your Teleport proxy.'}
           </Notice>
+            </View>
+          </View>
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -344,7 +375,16 @@ function messageFrom(error: unknown) {
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   safeArea: { flex: 1, backgroundColor: palette.ink },
-  content: { padding: space.lg, paddingBottom: space.xxl, gap: space.xl },
+  content: { flexGrow: 1, alignItems: 'center', padding: space.lg, paddingBottom: space.xxl },
+  contentCompact: { paddingHorizontal: space.md },
+  contentShort: { paddingVertical: space.md },
+  layout: { width: '100%', maxWidth: 560, gap: space.xl },
+  layoutSplit: { maxWidth: responsiveLayout.loginMaxWidth, flexDirection: 'row', alignItems: 'flex-start', gap: space.xxl },
+  layoutWide: { gap: 72 },
+  intro: { gap: space.xl },
+  introSplit: { flex: 0.82, minWidth: 0, maxWidth: 460 },
+  formColumn: { width: '100%', gap: space.lg },
+  formColumnSplit: { flex: 1, minWidth: 0, maxWidth: 580 },
   masthead: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   mark: {
     width: 38,
@@ -362,6 +402,9 @@ const styles = StyleSheet.create({
     letterSpacing: -1.1,
     maxWidth: 360,
   },
+  titleCompact: { fontSize: 38, lineHeight: 40 },
+  titleWide: { maxWidth: 430, fontSize: 52, lineHeight: 52 },
+  titleShort: { fontSize: 36, lineHeight: 37 },
   subtitle: {
     color: palette.mist,
     fontFamily: type.displayRegular,
@@ -369,7 +412,9 @@ const styles = StyleSheet.create({
     lineHeight: 24,
     maxWidth: 420,
   },
+  subtitleShort: { fontSize: 15, lineHeight: 20 },
   form: { gap: space.lg },
+  formShort: { gap: space.md },
   methodRow: { flexDirection: 'row', gap: space.sm },
   method: {
     flex: 1,

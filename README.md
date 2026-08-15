@@ -35,6 +35,8 @@ before relying on it for critical access.
   navigation and editing keys, F1–F12, and optional whole-line input.
 - Terminal mouse clicks and scroll events for compatible full-screen TUI apps.
 - Dynamic PTY sizing based on the actual mobile viewport.
+- Responsive phone and tablet layouts in portrait and landscape, including
+  multi-column node discovery and native iPad support.
 - Android foreground-service retention with a visible notification and
   Disconnect action.
 - Best-effort iOS background retention and connection verification on resume.
@@ -57,13 +59,14 @@ No tmux, screen, Mosh, agent, or other target-server software is required.
 ## Requirements
 
 - Node.js 22 or newer and npm.
-- Go 1.25 or newer plus `gomobile` and `gobind` for native core builds.
+- Go 1.26.4 or newer plus `gomobile` and `gobind` for native core builds.
 - Android Studio/SDK/NDK and JDK 17 for Android development.
 - macOS with Xcode for local iOS development.
 - A reachable Teleport proxy and a local Teleport user.
 
-The current Android Go binding targets `arm64-v8a`. iOS deployment targets 15.1
-or newer. This app requires an Expo development build; Expo Go is not sufficient.
+The Android Go binding targets `armeabi-v7a`, `arm64-v8a`, `x86`, and `x86_64`.
+iOS and iPadOS deployment targets 15.1 or newer. This app requires an Expo
+development build; Expo Go is not sufficient.
 
 ## Quick start
 
@@ -83,6 +86,7 @@ For a native Android build:
 go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260812174124-2f419b2fb945
 go install golang.org/x/mobile/cmd/gobind@v0.0.0-20260812174124-2f419b2fb945
 npm run build:core:android
+npm run verify:android-native
 npx expo prebuild --platform android
 npx expo run:android --device
 ```
@@ -129,7 +133,6 @@ requires the proxy certificate to be trusted by the phone's browser.
 - SSH nodes only; application, database, Kubernetes, and desktop access are not
   implemented.
 - No file transfer, agent forwarding, session joining, or per-session MFA.
-- Android release artifacts currently include only the `arm64-v8a` Go binding.
 - iOS background execution is bounded by the operating system and cannot
   guarantee an indefinitely live socket.
 - The web build is a UI preview and cannot connect to a real cluster.
@@ -143,9 +146,15 @@ The detailed design and protocol boundary are documented in
 npm run typecheck
 npm run lint
 npm run test:go
+npm run build:core:android
+npm run verify:android-native
 ```
 
-Pull requests and pushes to `main` run these checks in GitHub Actions.
+The native verifier rejects an Android artifact unless the Go bridge exists for
+all four ABIs and every 64-bit shared library uses at least 16 KB ELF LOAD
+alignment. Pull requests and pushes to `main` run the source checks in GitHub
+Actions; the signed release workflow additionally verifies the exact AAB
+downloaded from EAS before it can be submitted.
 
 ## Releases
 

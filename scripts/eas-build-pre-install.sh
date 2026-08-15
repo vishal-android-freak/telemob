@@ -3,8 +3,8 @@ set -euo pipefail
 
 app_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 platform="${EAS_BUILD_PLATFORM:-}"
-go_version="1.25.0"
-go_linux_amd64_sha256="2852af0cb20a13139b3448992e69b868e50ed0f8a1e5940ee1de9e19a123b613"
+go_version="1.26.4"
+go_linux_amd64_sha256="1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f"
 mobile_version="v0.0.0-20260812174124-2f419b2fb945"
 
 case "${platform}" in
@@ -47,3 +47,8 @@ go install "golang.org/x/mobile/cmd/gomobile@${mobile_version}"
 go install "golang.org/x/mobile/cmd/gobind@${mobile_version}"
 
 bash "${app_dir}/scripts/build-go-core.sh" "${platform}"
+
+if [[ "${platform}" == "android" ]]; then
+  bash "${app_dir}/scripts/verify-android-native-libs.sh" \
+    "${app_dir}/modules/expo-teleport/android/libs/teleportmobile.aar"
+fi

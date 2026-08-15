@@ -6,7 +6,8 @@
 ## Toolchain
 
 - Node.js 22 or newer with npm.
-- Go 1.25 or newer.
+- Go 1.26.4 or newer. Android release bindings must use Go 1.26.4 or newer so
+  the generated 64-bit ELF libraries support 16 KB page sizes.
 - `gomobile` and `gobind` at the version pinned by `go/teleportmobile/go.mod`.
 - Android SDK, NDK, and JDK 17 for Android builds.
 - Xcode on macOS for iOS builds.
@@ -40,19 +41,32 @@ Generate the Go AAR before Expo prebuild:
 
 ```bash
 npm run build:core:android
+npm run verify:android-native
 npx expo prebuild --platform android
 npx expo run:android --device
 ```
 
 The generated AAR is written to
 `modules/expo-teleport/android/libs/teleportmobile.aar` and is ignored by Git.
-The current binding contains only `arm64-v8a`; local development is tested on a
-Pixel 10. When invoking Gradle directly for that device, pass
-`-PreactNativeArchitectures=arm64-v8a` to avoid unrelated ABI builds.
+The generated AAR contains `armeabi-v7a`, `arm64-v8a`, `x86`, and `x86_64` so
+each ABI delivered by Google Play includes the Go bridge. Local development is
+tested on a Pixel 10. When invoking Gradle directly for that device, pass
+`-PreactNativeArchitectures=arm64-v8a` to shorten a device-only debug build;
+never use that override for a release bundle.
 
 Android terminal sessions use a foreground service. Test both notification
 permission outcomes, the notification Disconnect action, app background/resume,
 and the in-app Disconnect button after native changes.
+
+Android builds support portrait and landscape. Pixel 10 remains the primary
+physical-device target, while the x86 and x86_64 bindings also support Android
+emulator and compatible ChromeOS delivery.
+
+Expo prebuild applies the Google Play compliance plugin after the standard Expo
+plugins. The generated main activity is resizable and has no fixed orientation
+or aspect-ratio attributes. The generated app theme also omits the deprecated
+status-bar and navigation-bar color parameters; screens draw edge to edge and
+use safe-area insets instead.
 
 ## iOS
 
@@ -69,6 +83,26 @@ The generated XCFramework is written to
 by Git. The Expo podspec intentionally compiles only `ExpoTeleportModule.swift`;
 gomobile headers must remain owned by the vendored XCFramework rather than the
 Expo module's generated umbrella header.
+
+The iOS target supports both iPhone and iPad. App Store releases therefore need
+current iPhone and iPad screenshots in App Store Connect.
+
+## Responsive UI verification
+
+Responsive behavior is derived from the live window dimensions, not from a
+device-model allowlist. Check all three screens at these representative sizes:
+
+| Class | Representative viewport | Expected behavior |
+| --- | --- | --- |
+| Compact phone | 390 x 844 portrait | Single-column login and node list |
+| Short landscape phone | 844 x 390 | Split login, dense terminal controls |
+| Tablet portrait | 1024 x 1366 | Split login, two-column node grid |
+| Tablet landscape | 1366 x 1024 | Split login, three-column node grid |
+
+Rotate while a terminal is connected. The terminal must consume the remaining
+screen, recompute its rows and columns, and send the resulting PTY resize to the
+remote process. Also verify rotation with the software keyboard both open and
+dismissed; keyboard height must not be mistaken for a permanent device size.
 
 ## Connecting to a development proxy
 
@@ -89,11 +123,19 @@ Run all repository checks before opening a pull request:
 npm run typecheck
 npm run lint
 npm run test:go
+npm run build:core:android
+npm run verify:android-native
 ```
+
+`verify:android-native` accepts the generated AAR by default and may also be
+given an APK or AAB path. It checks that `libgojni.so` is present for
+`armeabi-v7a`, `arm64-v8a`, `x86`, and `x86_64`, then inspects every 64-bit
+shared library for 16 KB ELF LOAD alignment.
 
 Native transport changes should additionally be exercised against a development
 Teleport cluster on the affected platform. Terminal changes should be checked
-with an ordinary shell and at least one alternate-screen TUI.
+with an ordinary shell and at least one alternate-screen TUI, in both portrait
+and landscape when viewport behavior changed.
 
 ## Generated and local-only files
 

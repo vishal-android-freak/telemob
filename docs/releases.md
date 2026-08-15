@@ -31,9 +31,20 @@ artifact and the EAS build links are added to the job summary. For beta tags,
 the completed Android build is then submitted to Google Play's `beta` track,
 which is the Open testing track.
 
+Before continuing to iOS or submitting Android, the workflow downloads the
+exact AAB produced by EAS and checks it with
+`scripts/verify-android-native-libs.sh`. A release fails if the Go bridge is
+missing from any AAB ABI or if any 64-bit native library is not aligned for
+16 KB memory pages. The EAS pre-install hook pins Go 1.26.4 and builds the Go
+bridge for `armeabi-v7a`, `arm64-v8a`, `x86`, and `x86_64`.
+
 Stable tags create builds without submitting them. Beta tags submit Android to
 Google Play Open testing and upload iOS to TestFlight, but do not submit the iOS
 build for App Review or publish a GitHub Release.
+
+Because the iOS target supports iPad, App Store Connect requires both iPhone and
+iPad product-page screenshots. Refresh both sets when a release materially
+changes navigation, node cards, or the terminal layout.
 
 ## Store review demo
 

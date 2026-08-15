@@ -61,6 +61,7 @@
     "lint": "expo lint",
     "typecheck": "tsc --noEmit",
     "test:go": "cd go/teleportmobile && go test ./...",
+    "verify:android-native": "bash scripts/verify-android-native-libs.sh",
     "build:core:android": "bash scripts/build-go-core.sh android",
     "build:core:ios": "bash scripts/build-go-core.sh ios"
   },
