@@ -54,6 +54,10 @@ tested on a Pixel 10. When invoking Gradle directly for that device, pass
 `-PreactNativeArchitectures=arm64-v8a` to shorten a device-only debug build;
 never use that override for a release bundle.
 
+The binding script also supplies 16 KB maximum and common page-size linker
+flags explicitly. EAS SDK 57 uses Android NDK r27b, which otherwise emits a
+4 KB-aligned `libgojni.so`; NDK r28 and newer use 16 KB alignment by default.
+
 Android terminal sessions use a foreground service. Test both notification
 permission outcomes, the notification Disconnect action, app background/resume,
 and the in-app Disconnect button after native changes.

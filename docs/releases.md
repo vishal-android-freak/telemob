@@ -36,7 +36,9 @@ exact AAB produced by EAS and checks it with
 `scripts/verify-android-native-libs.sh`. A release fails if the Go bridge is
 missing from any AAB ABI or if any 64-bit native library is not aligned for
 16 KB memory pages. The EAS pre-install hook pins Go 1.26.4 and builds the Go
-bridge for `armeabi-v7a`, `arm64-v8a`, `x86`, and `x86_64`.
+bridge for `armeabi-v7a`, `arm64-v8a`, `x86`, and `x86_64`. The binding script
+passes the required 16 KB linker flags explicitly because the SDK 57 Android
+builder currently ships NDK r27b.
 
 Stable tags create builds without submitting them. Beta tags submit Android to
 Google Play Open testing and upload iOS to TestFlight, but do not submit the iOS

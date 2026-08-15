@@ -31,6 +31,12 @@ case "${platform}" in
     mkdir -p "${app_dir}/modules/expo-teleport/android/libs"
     (
       cd "${core_dir}"
+      # EAS SDK 57 currently uses NDK r27b. Unlike NDK r28+, r27 still
+      # defaults custom native links to 4 KB ELF pages, so pass Android's
+      # documented flexible-page-size flags explicitly. Keep any caller flags
+      # while making the gomobile-produced libgojni.so safe on 16 KB devices.
+      page_size_ldflags="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+      export CGO_LDFLAGS="${CGO_LDFLAGS:+${CGO_LDFLAGS} }${page_size_ldflags}"
       # The Android App Bundle contains React Native libraries for every
       # supported ABI. Build the Go bridge for the same complete set so Play
       # cannot deliver an otherwise valid split APK without libgojni.so.
