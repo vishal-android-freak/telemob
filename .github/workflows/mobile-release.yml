@@ -13,12 +13,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build Android and iOS
+  validate:
+    name: Validate tagged source
     runs-on: ubuntu-latest
-    timeout-minutes: 180
-    env:
-      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+    timeout-minutes: 20
 
     steps:
       - name: Check out tagged source
@@ -48,6 +46,31 @@ jobs:
           npm run typecheck
           npm run lint
           npm run test:go
+
+  android:
+    name: Build Android and submit to Play
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set release metadata
+        id: release
+        run: node scripts/configure-release.mjs "$GITHUB_REF_NAME" --write
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Require Expo token
         run: |
@@ -87,85 +110,11 @@ jobs:
             --output "${RUNNER_TEMP}/telemob.aab"
           bash scripts/verify-android-native-libs.sh "${RUNNER_TEMP}/telemob.aab"
 
-      - name: Build and submit iOS beta on EAS
-        if: steps.release.outputs.prerelease == 'true'
-        run: |
-          eas build \
-            --platform ios \
-            --profile "${{ steps.release.outputs.ios_profile }}" \
-            --auto-submit-with-profile testflight \
-            --non-interactive \
-            --wait \
-            --json > eas-build-ios.json
-
-      - name: Build stable iOS on EAS
-        if: steps.release.outputs.prerelease != 'true'
-        run: |
-          eas build \
-            --platform ios \
-            --profile "${{ steps.release.outputs.ios_profile }}" \
-            --non-interactive \
-            --wait \
-            --json > eas-build-ios.json
-
-      - name: Combine EAS build metadata
-        run: |
-          node --input-type=module <<'NODE'
-          import { readFileSync, writeFileSync } from 'node:fs';
-
-          const builds = ['eas-build-android.json', 'eas-build-ios.json']
-            .flatMap(path => {
-              const parsed = JSON.parse(readFileSync(path, 'utf8'));
-              return Array.isArray(parsed) ? parsed : [parsed];
-            });
-
-          writeFileSync('eas-builds.json', `${JSON.stringify(builds, null, 2)}\n`);
-          NODE
-
-      - name: Add EAS builds to job summary
-        env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          RELEASE_ANDROID_PROFILE: ${{ steps.release.outputs.android_profile }}
-          RELEASE_IOS_PROFILE: ${{ steps.release.outputs.ios_profile }}
-        run: |
-          node --input-type=module <<'NODE'
-          import { appendFileSync, readFileSync } from 'node:fs';
-
-          const parsed = JSON.parse(readFileSync('eas-builds.json', 'utf8'));
-          const builds = Array.isArray(parsed) ? parsed : [parsed];
-          const rows = builds.map(build => {
-            const owner = build.project?.ownerAccount?.name;
-            const slug = build.project?.slug;
-            const dashboard = owner && slug
-              ? `https://expo.dev/accounts/${owner}/projects/${slug}/builds/${build.id}`
-              : undefined;
-            const buildLink = dashboard ? `[${build.id}](${dashboard})` : build.id;
-            const artifact = build.artifacts?.buildUrl ?? build.artifacts?.applicationArchiveUrl;
-            const artifactLink = artifact ? `[artifact](${artifact})` : 'EAS dashboard';
-            return `| ${build.platform} | ${build.status} | ${buildLink} | ${artifactLink} |`;
-          });
-
-          appendFileSync(
-            process.env.GITHUB_STEP_SUMMARY,
-            [
-              `## Telemob ${process.env.RELEASE_TAG}`,
-              '',
-              `Android profile: \`${process.env.RELEASE_ANDROID_PROFILE}\``,
-              `iOS profile: \`${process.env.RELEASE_IOS_PROFILE}\``,
-              '',
-              '| Platform | Status | Build | Output |',
-              '| --- | --- | --- | --- |',
-              ...rows,
-              '',
-            ].join('\n')
-          );
-          NODE
-
-      - name: Upload EAS build metadata
+      - name: Upload Android EAS build metadata
         uses: actions/upload-artifact@v4
         with:
-          name: eas-builds-${{ steps.release.outputs.tag }}
-          path: eas-builds.json
+          name: eas-build-android-${{ steps.release.outputs.tag }}
+          path: eas-build-android.json
           if-no-files-found: error
           retention-days: 90
 
@@ -176,7 +125,7 @@ jobs:
           node --input-type=module <<'NODE'
           import { appendFileSync, readFileSync } from 'node:fs';
 
-          const parsed = JSON.parse(readFileSync('eas-builds.json', 'utf8'));
+          const parsed = JSON.parse(readFileSync('eas-build-android.json', 'utf8'));
           const builds = Array.isArray(parsed) ? parsed : [parsed];
           const android = builds.find(
             build => String(build.platform).toLowerCase() === 'android'
@@ -217,6 +166,74 @@ jobs:
             ].join('\n')
           );
           NODE
+
+  ios:
+    name: Build iOS and submit to TestFlight
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set release metadata
+        id: release
+        run: node scripts/configure-release.mjs "$GITHUB_REF_NAME" --write
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Require Expo token
+        run: |
+          if [[ -z "${EXPO_TOKEN}" ]]; then
+            echo "The EXPO_TOKEN repository secret is required for signed tag builds." >&2
+            exit 1
+          fi
+
+      - name: Set up Expo and EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          packager: npm
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Build and submit iOS beta on EAS
+        if: steps.release.outputs.prerelease == 'true'
+        run: |
+          eas build \
+            --platform ios \
+            --profile "${{ steps.release.outputs.ios_profile }}" \
+            --auto-submit-with-profile testflight \
+            --non-interactive \
+            --wait \
+            --json > eas-build-ios.json
+
+      - name: Build stable iOS on EAS
+        if: steps.release.outputs.prerelease != 'true'
+        run: |
+          eas build \
+            --platform ios \
+            --profile "${{ steps.release.outputs.ios_profile }}" \
+            --non-interactive \
+            --wait \
+            --json > eas-build-ios.json
+
+      - name: Upload iOS EAS build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: eas-build-ios-${{ steps.release.outputs.tag }}
+          path: eas-build-ios.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Add TestFlight submission to job summary
         if: steps.release.outputs.prerelease == 'true'

@@ -123,6 +123,64 @@ run_zig_build() {
   return 1
 }
 
+# Ghostty's universal lib-vt XCFramework includes an extra macOS fat-library
+# slice whose filename differs from the iOS slices. CocoaPods rejects vendored
+# static XCFrameworks with mixed binary names, so keep only the iOS device and
+# simulator slices that Telemob can actually consume.
+prepare_ios_xcframework() {
+  local xcframework="$1"
+  local plist="${xcframework}/Info.plist"
+  local plist_buddy="/usr/libexec/PlistBuddy"
+  local index=0
+  local platform
+  local identifier
+  local library_path
+  local ios_binary_name=""
+  local ios_slice_count=0
+  local -a macos_indexes=()
+
+  if [[ ! -f "${plist}" ]] || [[ ! -x "${plist_buddy}" ]]; then
+    echo "Unable to inspect generated Ghostty XCFramework metadata." >&2
+    return 1
+  fi
+
+  while platform="$(${plist_buddy} -c "Print :AvailableLibraries:${index}:SupportedPlatform" "${plist}" 2>/dev/null)"; do
+    identifier="$(${plist_buddy} -c "Print :AvailableLibraries:${index}:LibraryIdentifier" "${plist}")"
+    if [[ ! "${identifier}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+      echo "Unsafe Ghostty XCFramework slice identifier: ${identifier}" >&2
+      return 1
+    fi
+
+    case "${platform}" in
+      ios)
+        library_path="$(${plist_buddy} -c "Print :AvailableLibraries:${index}:LibraryPath" "${plist}")"
+        library_path="${library_path##*/}"
+        if [[ -n "${ios_binary_name}" ]] && [[ "${library_path}" != "${ios_binary_name}" ]]; then
+          echo "Ghostty iOS XCFramework slices use differing binary names." >&2
+          return 1
+        fi
+        ios_binary_name="${library_path}"
+        ios_slice_count=$((ios_slice_count + 1))
+        ;;
+      macos)
+        rm -rf "${xcframework:?}/${identifier}"
+        macos_indexes+=("${index}")
+        ;;
+    esac
+
+    index=$((index + 1))
+  done
+
+  if [[ "${ios_slice_count}" -lt 2 ]]; then
+    echo "Generated Ghostty XCFramework is missing iOS device or simulator slices." >&2
+    return 1
+  fi
+
+  for ((index=${#macos_indexes[@]} - 1; index >= 0; index--)); do
+    ${plist_buddy} -c "Delete :AvailableLibraries:${macos_indexes[index]}" "${plist}"
+  done
+}
+
 case "${platform}" in
   android)
     ndk_home="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
@@ -181,6 +239,7 @@ case "${platform}" in
         -Doptimize=ReleaseFast \
         --prefix "${build_prefix}"
     )
+    prepare_ios_xcframework "${build_prefix}/lib/ghostty-vt.xcframework"
     mv "${build_prefix}/lib/ghostty-vt.xcframework" "${output_dir}/"
     ;;
   *)

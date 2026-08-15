@@ -11,23 +11,21 @@ Pod::Spec.new do |s|
 
   s.dependency 'ExpoModulesCore'
   s.vendored_frameworks = [
-    'Frameworks/Teleportmobile.xcframework',
-    'Frameworks/ghostty-vt.xcframework'
+    'ios/Frameworks/Teleportmobile.xcframework',
+    'ios/Frameworks/ghostty-vt.xcframework'
   ]
 
-  # Swift/Objective-C compatibility
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
   }
 
-  # The gomobile headers belong exclusively to the vendored XCFramework.
-  # Recursively globbing this directory makes CocoaPods add private binding
-  # headers such as ref.h to ExpoTeleport's generated umbrella header.
+  # Keep the podspec at the module root so CocoaPods can package the shared C
+  # terminal core directly. Android compiles these same files with CMake.
   s.source_files = [
-    'ExpoTeleportModule.swift',
-    'TeleportTerminalView.swift',
-    '../native/telemob_terminal.{h,c}'
+    'ios/ExpoTeleportModule.swift',
+    'ios/TeleportTerminalView.swift',
+    'native/telemob_terminal.{h,c}'
   ]
-  s.public_header_files = '../native/telemob_terminal.h'
-  s.resources = '../native/licenses/GHOSTTY_LICENSE.txt'
+  s.public_header_files = 'native/telemob_terminal.h'
+  s.resources = 'native/licenses/GHOSTTY_LICENSE.txt'
 end

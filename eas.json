@@ -8,7 +8,7 @@
       "developmentClient": true,
       "distribution": "internal",
       "ios": {
-        "image": "sdk-57"
+        "image": "macos-sequoia-15.6-xcode-26.2"
       }
     },
     "preview": {
@@ -17,7 +17,7 @@
         "buildType": "apk"
       },
       "ios": {
-        "image": "sdk-57"
+        "image": "macos-sequoia-15.6-xcode-26.2"
       }
     },
     "production": {
@@ -26,7 +26,7 @@
         "buildType": "app-bundle"
       },
       "ios": {
-        "image": "sdk-57"
+        "image": "macos-sequoia-15.6-xcode-26.2"
       }
     },
     "beta": {

@@ -1,7 +1,8 @@
 {
   "platforms": ["apple", "android"],
   "apple": {
-    "modules": ["ExpoTeleportModule"]
+    "modules": ["ExpoTeleportModule"],
+    "podspecPath": "./ExpoTeleport.podspec"
   },
   "android": {
     "modules": ["com.naarang.telemob.teleport.ExpoTeleportModule"]
