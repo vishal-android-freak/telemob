@@ -6,14 +6,45 @@ plugins {
 group = 'com.naarang.telemob.teleport'
 version = '0.1.0'
 
+def supportedGhosttyAbis = ['arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64']
+def availableGhosttyAbis = supportedGhosttyAbis.findAll { abi ->
+  file("../native/ghostty/android/${abi}/lib/libghostty-vt.a").exists()
+}
+def requestedArchitectures = providers.gradleProperty('reactNativeArchitectures')
+  .orNull
+  ?.split(',')
+  ?.collect { it.trim() }
+  ?.findAll { !it.isEmpty() }
+def selectedGhosttyAbis = requestedArchitectures
+  ? availableGhosttyAbis.findAll { requestedArchitectures.contains(it) }
+  : availableGhosttyAbis
+
 android {
   namespace "com.naarang.telemob.teleport"
+  ndkVersion rootProject.ext.ndkVersion
   defaultConfig {
     versionCode 1
     versionName "0.1.0"
+    ndk {
+      abiFilters.addAll(selectedGhosttyAbis)
+    }
+    externalNativeBuild {
+      cmake {
+        arguments "-DANDROID_STL=none"
+      }
+    }
+  }
+  externalNativeBuild {
+    cmake {
+      path "src/main/cpp/CMakeLists.txt"
+      version "3.22.1"
+    }
   }
   lintOptions {
     abortOnError false
+  }
+  sourceSets {
+    main.assets.srcDir '../native/licenses'
   }
 }
 

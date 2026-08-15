@@ -13,9 +13,9 @@ Expo Router screens
         │ typed requests, snapshots, and events
         ▼
 Expo native module (Swift or Kotlin)
-        │ generated gomobile bindings
-        ▼
-Shared Go core
+        ├──► libghostty-vt + native terminal view
+        │
+        └──► generated gomobile bindings ──► Shared Go core
         │ HTTPS + authenticated binary WebSocket
         ▼
 Teleport proxy ──► SSH node
@@ -26,12 +26,14 @@ Teleport proxy ──► SSH node
 - `src/app` owns routing and mobile screens.
 - `src/lib/teleport` owns the TypeScript client boundary, secure profile
   restoration, and the deterministic web preview.
-- `src/lib/terminal` owns xterm parsing, screen snapshots, input sequences,
-  viewport sizing, reconnect behavior, and React subscriptions.
+- `src/lib/terminal` owns input sequences, viewport/session coordination,
+  reconnect behavior, and React subscriptions. It does not parse or paint the
+  terminal screen.
 - `go/teleportmobile` owns authentication, proxy requests, session state,
   WebSocket PTY transport, output sequencing, and replay.
-- `modules/expo-teleport` exposes the Go API to Kotlin and Swift and owns native
-  platform behavior such as Browser MFA presentation and background leases.
+- `modules/expo-teleport` exposes the Go API to Kotlin and Swift, embeds the
+  shared `libghostty-vt` parser, paints the terminal with native platform APIs,
+  and owns platform behavior such as Browser MFA and background leases.
 - `scripts/build-go-core.sh` generates the ignored Android AAR or iOS
   XCFramework consumed by the Expo module.
 
@@ -82,10 +84,13 @@ under their respective licenses.
 
 ## Terminal rendering and input
 
-`@xterm/headless` parses the remote byte stream and provides a canonical screen
-buffer. Telemob snapshots that buffer into fixed terminal rows and cell
-positions for React Native. Glyphs are painted independently from cell
-backgrounds so Android font metrics cannot clip text or shift a TUI grid.
+The same pinned `libghostty-vt` source parses the remote byte stream on Android
+and iOS. A small shared C bridge produces an exact cell-grid snapshot. Android
+paints it with a native `Canvas`; iOS paints it with Core Graphics and UIKit.
+React Native lays out the terminal view but does not create one component per
+cell or line. Ghostty also reports alternate-screen, mouse-tracking, and
+bracketed-paste modes and generates terminal query responses written back to
+the SSH PTY.
 
 The PTY size is derived from the measured viewport. Ordinary shell screens use
 a compact font; alternate-screen TUIs use a larger font and receive the true
@@ -98,7 +103,7 @@ content width. On short landscape screens, terminal chrome becomes denser so
 the PTY retains as much height as possible. iOS and Android both permit runtime
 orientation changes, and iPad is an enabled native target.
 
-Touch taps and swipes become standard SGR mouse events only when xterm reports
+Touch taps and swipes become standard SGR mouse events only when Ghostty reports
 that the remote application enabled mouse tracking. Keyboard input otherwise
 passes through as terminal bytes. Ctrl and Alt are one-shot modifiers for the
 next key, avoiding a prefix sequence such as `Ctrl+B`, `Q` becoming
@@ -110,8 +115,8 @@ The React terminal screen subscribes to a process-wide session manager. Route
 unmounting detaches the view but does not close SSH. The Go core assigns PTY
 frames a monotonic sequence and retains a bounded 1 MiB replay window below
 React. On resume, the manager fetches missed frames, pings the WebSocket, and
-resizes the PTY. A failed check creates a new SSH session and a fresh terminal
-parser so old output is not appended to a replacement shell.
+resizes the PTY. A failed check creates a new SSH session and a fresh native
+terminal so old output is not appended to a replacement shell.
 
 Closing a shell transitions the process-wide session to `closed`. The terminal
 route then pops from the navigation stack, revealing the existing node list

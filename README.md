@@ -195,8 +195,10 @@ imply endorsement or affiliation.
 Telemob also builds on [Expo](https://expo.dev/),
 [React Native](https://reactnative.dev/), [Go](https://go.dev/),
 [`gomobile`](https://pkg.go.dev/golang.org/x/mobile/cmd/gomobile), and
-[`xterm.js`](https://xtermjs.org/), along with the other projects listed in its
-dependency manifests.
+[`libghostty-vt`](https://github.com/ghostty-org/ghostty), along with the other
+projects listed in its dependency manifests. Ghostty's required MIT notice is
+bundled with both mobile apps and kept in
+`modules/expo-teleport/native/licenses`.
 
 ## License
 

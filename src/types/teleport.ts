@@ -57,7 +57,15 @@ export type TeleportCapabilities = {
 };
 
 export type TerminalEvent =
-  | { type: 'data'; sessionId: string; data: string; sequence: number }
+  | {
+      type: 'data';
+      sessionId: string;
+      data: string;
+      sequence: number;
+      alternateScreen?: boolean;
+      mouseTracking?: boolean;
+      bracketedPaste?: boolean;
+    }
   | { type: 'closed'; sessionId: string; reason?: string }
   | { type: 'error'; sessionId: string; message: string };
 
@@ -67,6 +75,9 @@ export type TerminalOutputSnapshot = {
   latestSequence: number;
   truncated: boolean;
   chunks: { sequence: number; data: string }[];
+  alternateScreen?: boolean;
+  mouseTracking?: boolean;
+  bracketedPaste?: boolean;
   reason?: string;
   error?: string;
 };

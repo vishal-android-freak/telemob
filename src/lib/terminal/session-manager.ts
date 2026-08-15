@@ -1,11 +1,8 @@
-import type { Terminal as HeadlessTerminal } from '@xterm/headless';
-import { AppState, type AppStateStatus } from 'react-native';
+import { AppState, Platform, type AppStateStatus } from 'react-native';
 
 import { getTeleportClient, type TeleportClient } from '@/lib/teleport/client';
 import { saveSessionSnapshot } from '@/lib/teleport/profile-store';
-import { createTerminal } from '@/lib/terminal/runtime';
 import { terminalMouseScrollSequence, terminalMouseTapSequence } from '@/lib/terminal/keys';
-import { snapshotTerminal, type TerminalLine } from '@/lib/terminal/snapshot';
 import type {
   SessionTarget,
   TerminalEvent,
@@ -26,29 +23,28 @@ export type TerminalSessionSnapshot = {
   sessionId: string;
   state: TerminalConnectionState;
   error: string;
-  lines: TerminalLine[];
   alternateScreen: boolean;
   mouseTracking: boolean;
-  generation: number;
+  fallbackText: string;
 };
 
 type Size = { columns: number; rows: number };
 type Listener = (snapshot: TerminalSessionSnapshot) => void;
 
 const INITIAL_SIZE: Size = { columns: 84, rows: 40 };
+const RESIZE_SETTLE_MS = 300;
 
 class TerminalSessionManager {
   private readonly client: TeleportClient;
-  private terminal: HeadlessTerminal;
-  private terminalParsedSubscription?: { dispose(): void };
-  private terminalResponseSubscription?: { dispose(): void };
   private listeners = new Set<Listener>();
   private target?: SessionTarget;
   private sessionId = '';
   private state: TerminalConnectionState = 'idle';
   private error = '';
-  private lines: TerminalLine[];
-  private generation = 0;
+  private alternateScreen = false;
+  private mouseTracking = false;
+  private bracketedPaste = false;
+  private fallbackText = '';
   private lastSequence = 0;
   private size = INITIAL_SIZE;
   private connectionAttempt = 0;
@@ -63,9 +59,6 @@ class TerminalSessionManager {
 
   constructor() {
     this.client = getTeleportClient();
-    this.terminal = createTerminal(INITIAL_SIZE.columns, INITIAL_SIZE.rows);
-    this.lines = snapshotTerminal(this.terminal);
-    this.bindTerminal();
     this.client.subscribe(event => this.handleEvent(event));
     AppState.addEventListener('change', nextState => this.handleAppState(nextState));
   }
@@ -75,10 +68,9 @@ class TerminalSessionManager {
     sessionId: this.sessionId,
     state: this.state,
     error: this.error,
-    lines: this.lines,
-    alternateScreen: this.terminal.buffer.active.type === 'alternate',
-    mouseTracking: this.terminal.modes.mouseTrackingMode !== 'none',
-    generation: this.generation,
+    alternateScreen: this.alternateScreen,
+    mouseTracking: this.mouseTracking,
+    fallbackText: this.fallbackText,
   });
 
   subscribe = (listener: Listener) => {
@@ -105,7 +97,7 @@ class TerminalSessionManager {
     this.sessionId = '';
     this.lastSequence = 0;
     this.queuedEvents = [];
-    this.replaceTerminal();
+    this.resetTerminalState();
     this.publish();
     if (previousSession) void this.client.closeSession(previousSession);
     void this.connect('initial');
@@ -127,21 +119,21 @@ class TerminalSessionManager {
   }
 
   paste(data: string) {
-    const payload = this.terminal.modes.bracketedPasteMode
+    const payload = this.bracketedPaste
       ? `\u001b[200~${data}\u001b[201~`
       : data;
     return this.send(payload);
   }
 
   sendMouseTap(column: number, row: number) {
-    if (this.terminal.modes.mouseTrackingMode === 'none') {
+    if (!this.mouseTracking) {
       return Promise.resolve(false);
     }
     return this.send(terminalMouseTapSequence(column, row)).then(() => true);
   }
 
   sendMouseScroll(column: number, row: number, direction: 'up' | 'down', steps: number) {
-    if (this.terminal.modes.mouseTrackingMode === 'none') {
+    if (!this.mouseTracking) {
       return Promise.resolve(false);
     }
     return this.send(terminalMouseScrollSequence(column, row, direction, steps)).then(() => true);
@@ -151,10 +143,6 @@ class TerminalSessionManager {
     if (columns < 1 || rows < 1) return;
     this.size = { columns, rows };
     if (this.target) this.target = { ...this.target, columns, rows };
-    this.terminal.resize(columns, rows);
-    this.lines = snapshotTerminal(this.terminal);
-    this.publish();
-
     if (!this.sessionId) return;
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     const sessionId = this.sessionId;
@@ -162,7 +150,7 @@ class TerminalSessionManager {
       this.client.resizeSession(sessionId, columns, rows).catch(error => {
         if (this.sessionId === sessionId) this.setError(messageFrom(error));
       });
-    }, 120);
+    }, RESIZE_SETTLE_MS);
   }
 
   async disconnect() {
@@ -186,7 +174,7 @@ class TerminalSessionManager {
     this.sessionId = '';
     this.lastSequence = 0;
     this.queuedEvents = [];
-    this.replaceTerminal();
+    this.resetTerminalState();
     this.state = mode === 'resume' ? 'reconnecting' : 'connecting';
     this.error = '';
     this.publish();
@@ -270,9 +258,18 @@ class TerminalSessionManager {
   private async performOutputSync(sessionId: string) {
     const output = await this.client.sessionOutput(sessionId, this.lastSequence);
     if (this.sessionId !== sessionId) return output;
+    if (typeof output.alternateScreen === 'boolean') {
+      this.alternateScreen = output.alternateScreen;
+    }
+    if (typeof output.mouseTracking === 'boolean') {
+      this.mouseTracking = output.mouseTracking;
+    }
+    if (typeof output.bracketedPaste === 'boolean') {
+      this.bracketedPaste = output.bracketedPaste;
+    }
     if (output.truncated) {
       this.lastSequence = 0;
-      this.replaceTerminal();
+      this.resetTerminalState();
     }
     const queued = this.queuedEvents;
     this.queuedEvents = [];
@@ -288,6 +285,7 @@ class TerminalSessionManager {
   private handleEvent(event: TerminalEvent) {
     if (!this.sessionId || event.sessionId !== this.sessionId) return;
     if (event.type === 'data') {
+      this.updateModes(event);
       if (this.outputSync?.sessionId === event.sessionId) {
         this.queuedEvents.push(event);
         return;
@@ -312,7 +310,10 @@ class TerminalSessionManager {
   private consumeChunk(sequence: number, data: string) {
     if (sequence <= this.lastSequence) return;
     this.lastSequence = sequence;
-    this.terminal.write(data);
+    if (Platform.OS === 'web') {
+      this.fallbackText = `${this.fallbackText}${data}`.slice(-65536);
+    }
+    this.publish();
   }
 
   private handleAppState(nextState: AppStateStatus) {
@@ -327,27 +328,23 @@ class TerminalSessionManager {
     void this.checkExistingSession();
   }
 
-  private replaceTerminal() {
-    this.terminalParsedSubscription?.dispose();
-    this.terminalResponseSubscription?.dispose();
-    this.terminal.dispose();
-    this.terminal = createTerminal(this.size.columns, this.size.rows);
-    this.lines = snapshotTerminal(this.terminal);
-    this.generation += 1;
-    this.bindTerminal();
+  private resetTerminalState() {
+    this.alternateScreen = false;
+    this.mouseTracking = false;
+    this.bracketedPaste = false;
+    this.fallbackText = '';
   }
 
-  private bindTerminal() {
-    this.terminalParsedSubscription = this.terminal.onWriteParsed(() => {
-      this.lines = snapshotTerminal(this.terminal);
-      this.publish();
-    });
-    this.terminalResponseSubscription = this.terminal.onData(data => {
-      if (!this.sessionId) return;
-      this.client.writeSession(this.sessionId, data).catch(error => {
-        this.setError(messageFrom(error));
-      });
-    });
+  private updateModes(event: Extract<TerminalEvent, { type: 'data' }>) {
+    if (typeof event.alternateScreen === 'boolean') {
+      this.alternateScreen = event.alternateScreen;
+    }
+    if (typeof event.mouseTracking === 'boolean') {
+      this.mouseTracking = event.mouseTracking;
+    }
+    if (typeof event.bracketedPaste === 'boolean') {
+      this.bracketedPaste = event.bracketedPaste;
+    }
   }
 
   private setError(error: string) {

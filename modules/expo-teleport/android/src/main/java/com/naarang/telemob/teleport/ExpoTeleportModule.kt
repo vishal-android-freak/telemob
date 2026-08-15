@@ -23,6 +23,14 @@ class ExpoTeleportModule : Module() {
   private val eventSink = object : EventSink {
     override fun onTerminalEvent(eventJSON: String) {
       val event = JSONObject(eventJSON)
+      NativeTerminalRegistry.handleEvent(event)
+      val sessionId = event.optString("sessionId")
+      NativeTerminalRegistry.modes(sessionId)?.let { modes ->
+        event.put("alternateScreen", modes.alternateScreen)
+        event.put("mouseTracking", modes.mouseTracking)
+        event.put("bracketedPaste", modes.bracketedPaste)
+      }
+      flushTerminalResponse(sessionId)
       if (event.optString("type") == "closed") {
         appContext.reactContext?.let { context ->
           TerminalForegroundService.release(context, event.optString("sessionId"))
@@ -36,6 +44,26 @@ class ExpoTeleportModule : Module() {
     Name("ExpoTeleport")
 
     Events("onTerminalEvent")
+
+    View(TeleportTerminalView::class) {
+      Events("onDimensions")
+
+      Prop("sessionId") { view: TeleportTerminalView, sessionId: String ->
+        view.sessionId = sessionId
+      }
+
+      Prop("fontSize") { view: TeleportTerminalView, fontSize: Float ->
+        view.fontSize = fontSize
+      }
+
+      AsyncFunction("scrollBy") { view: TeleportTerminalView, rows: Int ->
+        NativeTerminalRegistry.scroll(view.sessionId, rows)
+      }
+
+      AsyncFunction("scrollToBottom") { view: TeleportTerminalView ->
+        NativeTerminalRegistry.scrollToBottom(view.sessionId)
+      }
+    }
 
     OnCreate {
       core.setEventSink(eventSink)
@@ -67,6 +95,7 @@ class ExpoTeleportModule : Module() {
 
     AsyncFunction("logoutAsync") {
       core.logout()
+      NativeTerminalRegistry.closeAll()
       appContext.reactContext?.let(TerminalForegroundService::stop)
       browserMFARequests.clear()
     }
@@ -110,6 +139,7 @@ class ExpoTeleportModule : Module() {
       awaitNotificationPermission()
       core.openSessionJSON(targetJSON).also { sessionJSON ->
         val session = JSONObject(sessionJSON)
+        NativeTerminalRegistry.prepare(session.getString("id"))
         val target = JSONObject(targetJSON)
         appContext.reactContext?.let { context ->
           TerminalForegroundService.start(
@@ -134,11 +164,21 @@ class ExpoTeleportModule : Module() {
     }
 
     AsyncFunction("sessionOutputAsync") { sessionID: String, afterSequence: Double ->
-      core.sessionOutputJSON(sessionID, afterSequence.toLong())
+      val output = core.sessionOutputJSON(sessionID, afterSequence.toLong())
+      NativeTerminalRegistry.handleReplay(output)
+      flushTerminalResponse(sessionID)
+      JSONObject(output).apply {
+        NativeTerminalRegistry.modes(sessionID)?.let { modes ->
+          put("alternateScreen", modes.alternateScreen)
+          put("mouseTracking", modes.mouseTracking)
+          put("bracketedPaste", modes.bracketedPaste)
+        }
+      }.toString()
     }
 
     AsyncFunction("closeSessionAsync") { sessionID: String ->
       core.closeSession(sessionID)
+      NativeTerminalRegistry.close(sessionID)
       appContext.reactContext?.let { context ->
         TerminalForegroundService.release(context, sessionID)
       }
@@ -160,6 +200,11 @@ class ExpoTeleportModule : Module() {
         Manifest.permission.POST_NOTIFICATIONS
       )
     }
+  }
+
+  private fun flushTerminalResponse(sessionId: String) {
+    val response = NativeTerminalRegistry.takePtyWrite(sessionId) ?: return
+    runCatching { core.writeSession(sessionId, response) }
   }
 }
 

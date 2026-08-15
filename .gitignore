@@ -45,5 +45,7 @@ example
 
 # generated gomobile bindings
 /modules/expo-teleport/android/build/
+/modules/expo-teleport/android/.cxx/
 /modules/expo-teleport/android/libs/
 /modules/expo-teleport/ios/Frameworks/
+/modules/expo-teleport/native/ghostty/

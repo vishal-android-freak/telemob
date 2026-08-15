@@ -18,8 +18,8 @@ keyboards usually omit.
   navigation and editing keys belong in the terminal input surface rather than
   an app-specific command language.
 
-These projects informed the interaction model only. Telemob's implementation is
-its own React Native and xterm-based terminal layer.
+These projects informed the interaction model only. Telemob uses its own Expo
+module around `libghostty-vt` and native Android/iOS drawing surfaces.
 
 ## Current key rail
 
@@ -36,7 +36,7 @@ Ctrl and Alt apply to the next character or utility key and then release. This
 matches prefix-driven tools: tapping `CTRL`, typing `b`, and then typing `q`
 sends `Ctrl+B` followed by plain `q`.
 
-Navigation and function keys use xterm-compatible CSI modifier parameters.
+Navigation and function keys use standard CSI modifier parameters.
 Paste uses bracketed paste when the remote terminal has enabled it.
 
 ## Direct input and line mode
@@ -52,7 +52,7 @@ and should not be used for interactive full-screen applications.
 
 ## Mouse-aware terminal applications
 
-When the remote application enables xterm mouse tracking, Telemob translates a
+When the remote application enables terminal mouse tracking, Telemob translates a
 tap into an SGR button press/release at the touched terminal cell. A vertical
 swipe becomes repeated SGR wheel events. This supports buttons and scrolling in
 compatible TUIs without turning every terminal touch into remote input.

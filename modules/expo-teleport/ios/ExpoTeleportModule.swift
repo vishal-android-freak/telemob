@@ -8,18 +8,32 @@ public final class ExpoTeleportModule: Module {
   private lazy var eventSink = TerminalEventSink { [weak self] event in
     guard
       let data = event.data(using: .utf8),
-      let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+      var payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     else {
       return
     }
+    NativeTerminalRegistry.shared.handle(event: payload)
+    let sessionID = payload["sessionId"] as? String ?? ""
+    if let modes = NativeTerminalRegistry.shared.modes(sessionID: sessionID) {
+      payload["alternateScreen"] = modes.alternateScreen
+      payload["mouseTracking"] = modes.mouseTracking
+      payload["bracketedPaste"] = modes.bracketedPaste
+    }
+    if
+      let self,
+      let response = NativeTerminalRegistry.shared.takePtyWrite(sessionID: sessionID)
+    {
+      try? self.core.writeSession(sessionID, data: response)
+    }
+    let eventPayload = payload
     DispatchQueue.main.async {
       if
-        payload["type"] as? String == "closed",
-        let sessionID = payload["sessionId"] as? String
+        eventPayload["type"] as? String == "closed",
+        let sessionID = eventPayload["sessionId"] as? String
       {
         BackgroundTerminalLease.shared.stop(sessionID: sessionID)
       }
-      self?.sendEvent("onTerminalEvent", payload)
+      self?.sendEvent("onTerminalEvent", eventPayload)
     }
   }
 
@@ -27,6 +41,26 @@ public final class ExpoTeleportModule: Module {
     Name("ExpoTeleport")
 
     Events("onTerminalEvent")
+
+    View(TeleportTerminalView.self) {
+      Events("onDimensions")
+
+      Prop("sessionId") { (view: TeleportTerminalView, sessionID: String) in
+        view.sessionID = sessionID
+      }
+
+      Prop("fontSize") { (view: TeleportTerminalView, fontSize: Double) in
+        view.fontSize = CGFloat(fontSize)
+      }
+
+      AsyncFunction("scrollBy") { (view: TeleportTerminalView, rows: Int) in
+        NativeTerminalRegistry.shared.scroll(sessionID: view.sessionID, rows: rows)
+      }
+
+      AsyncFunction("scrollToBottom") { (view: TeleportTerminalView) in
+        NativeTerminalRegistry.shared.scrollToBottom(sessionID: view.sessionID)
+      }
+    }
 
     OnCreate {
       core.setEventSink(eventSink)
@@ -59,6 +93,7 @@ public final class ExpoTeleportModule: Module {
 
     AsyncFunction("logoutAsync") {
       core.logout()
+      NativeTerminalRegistry.shared.closeAll()
       BackgroundTerminalLease.shared.stopAll()
       BrowserMFALease.shared.stop()
       browserMFARequests.removeAll()
@@ -152,6 +187,7 @@ public final class ExpoTeleportModule: Module {
         let session = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
         let sessionID = session["id"] as? String
       {
+        NativeTerminalRegistry.shared.prepare(sessionID: sessionID)
         BackgroundTerminalLease.shared.start(sessionID: sessionID)
       }
       return sessionJSON
@@ -170,13 +206,29 @@ public final class ExpoTeleportModule: Module {
     }
 
     AsyncFunction("sessionOutputAsync") { (sessionID: String, afterSequence: Double) throws -> String in
-      try callGo { error in
+      let output = try callGo { error in
         core.sessionOutputJSON(sessionID, afterSequence: Int64(afterSequence), error: error)
       }
+      NativeTerminalRegistry.shared.handle(replayJSON: output)
+      if let response = NativeTerminalRegistry.shared.takePtyWrite(sessionID: sessionID) {
+        try core.writeSession(sessionID, data: response)
+      }
+      guard
+        let data = output.data(using: .utf8),
+        var payload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+      else { return output }
+      if let modes = NativeTerminalRegistry.shared.modes(sessionID: sessionID) {
+        payload["alternateScreen"] = modes.alternateScreen
+        payload["mouseTracking"] = modes.mouseTracking
+        payload["bracketedPaste"] = modes.bracketedPaste
+      }
+      let encoded = try JSONSerialization.data(withJSONObject: payload)
+      return String(decoding: encoded, as: UTF8.self)
     }
 
     AsyncFunction("closeSessionAsync") { (sessionID: String) in
       core.closeSession(sessionID)
+      NativeTerminalRegistry.shared.close(sessionID: sessionID)
       BackgroundTerminalLease.shared.stop(sessionID: sessionID)
     }
   }

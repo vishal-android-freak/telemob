@@ -47,6 +47,7 @@ go install "golang.org/x/mobile/cmd/gomobile@${mobile_version}"
 go install "golang.org/x/mobile/cmd/gobind@${mobile_version}"
 
 bash "${app_dir}/scripts/build-go-core.sh" "${platform}"
+bash "${app_dir}/scripts/build-ghostty-terminal.sh" "${platform}"
 
 if [[ "${platform}" == "android" ]]; then
   bash "${app_dir}/scripts/verify-android-native-libs.sh" \

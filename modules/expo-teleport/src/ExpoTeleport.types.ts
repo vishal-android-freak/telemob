@@ -7,6 +7,9 @@ export type TerminalEventPayload = {
   sessionId: string;
   data?: string;
   sequence?: number;
+  alternateScreen?: boolean;
+  mouseTracking?: boolean;
+  bracketedPaste?: boolean;
   reason?: string;
   message?: string;
 };

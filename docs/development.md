@@ -9,6 +9,8 @@
 - Go 1.26.4 or newer. Android release bindings must use Go 1.26.4 or newer so
   the generated 64-bit ELF libraries support 16 KB page sizes.
 - `gomobile` and `gobind` at the version pinned by `go/teleportmobile/go.mod`.
+- Zig 0.15.2 for `libghostty-vt`. The build script downloads and verifies it
+  automatically when the pinned compiler is not already in `.tools/`.
 - Android SDK, NDK, and JDK 17 for Android builds.
 - Xcode on macOS for iOS builds.
 
@@ -41,6 +43,7 @@ Generate the Go AAR before Expo prebuild:
 
 ```bash
 npm run build:core:android
+npm run build:terminal:android
 npm run verify:android-native
 npx expo prebuild --platform android
 npx expo run:android --device
@@ -48,6 +51,11 @@ npx expo run:android --device
 
 The generated AAR is written to
 `modules/expo-teleport/android/libs/teleportmobile.aar` and is ignored by Git.
+The Ghostty script builds the revision pinned in
+`scripts/build-ghostty-terminal.sh` into
+`modules/expo-teleport/native/ghostty/android/<abi>`; these products are also
+ignored. By default it builds every Play-supported ABI. Set
+`TELEMOB_ANDROID_ABIS=arm64-v8a` only for a local Pixel 10 build.
 The generated AAR contains `armeabi-v7a`, `arm64-v8a`, `x86`, and `x86_64` so
 each ABI delivered by Google Play includes the Go bridge. Local development is
 tested on a Pixel 10. When invoking Gradle directly for that device, pass
@@ -78,15 +86,17 @@ On macOS:
 
 ```bash
 npm run build:core:ios
+npm run build:terminal:ios
 npx expo prebuild --platform ios
 npx expo run:ios --device
 ```
 
 The generated XCFramework is written to
 `modules/expo-teleport/ios/Frameworks/Teleportmobile.xcframework` and is ignored
-by Git. The Expo podspec intentionally compiles only `ExpoTeleportModule.swift`;
-gomobile headers must remain owned by the vendored XCFramework rather than the
-Expo module's generated umbrella header.
+by Git. `ghostty-vt.xcframework` is generated beside it from the same pinned
+source used by Android. The Expo podspec compiles the shared terminal C bridge
+and Swift view while keeping gomobile headers owned by the Teleportmobile
+XCFramework.
 
 The iOS target supports both iPhone and iPad. App Store releases therefore need
 current iPhone and iPad screenshots in App Store Connect.
@@ -128,6 +138,7 @@ npm run typecheck
 npm run lint
 npm run test:go
 npm run build:core:android
+npm run build:terminal:android
 npm run verify:android-native
 ```
 
@@ -150,5 +161,5 @@ Do not commit:
 - generated AARs or XCFrameworks;
 - signing keys, provisioning profiles, certificates, or local environment files.
 
-The EAS pre-install hook regenerates the correct Go artifact independently on
-each cloud platform.
+The EAS pre-install hook regenerates both the Go transport and pinned Ghostty
+terminal artifacts independently on each cloud platform.
