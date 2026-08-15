@@ -73,7 +73,7 @@ final class GhosttyTerminalEngine {
   func prepareSnapshot() -> Data? {
     os_signpost(.begin, log: terminalPerformanceLog, name: "Telemob.prepareSnapshot")
     defer { os_signpost(.end, log: terminalPerformanceLog, name: "Telemob.prepareSnapshot") }
-    locked {
+    return locked { () -> Data? in
       guard let handle else { return nil }
       var bytes: UnsafeMutablePointer<UInt8>?
       var length = 0
@@ -694,7 +694,7 @@ final class NativeTerminalRegistry {
       self.locked {
         guard self.sessions.values.contains(where: { $0 === session }) else { return }
         session.renderScheduled = false
-        session.engine?.prepareSnapshot()
+        _ = session.engine?.prepareSnapshot()
         session.views.allObjects.forEach { $0.requestRender() }
       }
     }
@@ -794,7 +794,6 @@ public final class TeleportTerminalView: ExpoView {
         let row = index / snapshotColumns
         let flags = readU16(bytes, offset + 6)
         if flags & flagBlink != 0 { needsBlink = true }
-        let textLength = min(Int(bytes[offset + 12]), terminalTextCapacity)
         var cellBackground = color(bytes, offset + 3)
         if flags & flagSelected != 0 { cellBackground = selectionBackground }
         let blockCursor = cursorVisible && cursorStyle == cursorBlock &&

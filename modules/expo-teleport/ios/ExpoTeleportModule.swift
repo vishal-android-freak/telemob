@@ -183,7 +183,7 @@ public final class ExpoTeleportModule: Module {
       if !credentialJSON.isEmpty {
         do {
           promise.resolve(try callGo { error in
-            core.finishPasskey(challengeID, credentialJSON: credentialJSON, error: error)
+            self.core.finishPasskey(challengeID, credentialJSON: credentialJSON, error: error)
           })
         } catch {
           promise.reject(error)
