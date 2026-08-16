@@ -411,6 +411,9 @@ func (w *webTransport) listServers() (string, error) {
 	endpoint := "/v1/webapi/sites/" + url.PathEscape(session.cluster) + "/nodes?limit=200"
 	var response nodeListResponse
 	if err := doJSON(context.Background(), session.client, session.baseURL, http.MethodGet, endpoint, nil, session.token, "", &response); err != nil {
+		if hasHTTPStatus(err, http.StatusUnauthorized) {
+			return "", errors.New("the Teleport login has expired; authenticate again")
+		}
 		return "", fmt.Errorf("list Teleport servers: %w", err)
 	}
 	servers := make([]map[string]any, 0, len(response.Items))
@@ -778,6 +781,9 @@ func (w *webTransport) freshSession() (*webSession, error) {
 
 	var response webSessionResponse
 	if err := doJSON(context.Background(), session.client, session.baseURL, http.MethodPost, "/v1/webapi/sessions/web/renew", map[string]any{}, session.token, "", &response); err != nil {
+		if hasHTTPStatus(err, http.StatusUnauthorized, http.StatusForbidden) {
+			return nil, errors.New("the Teleport login has expired; authenticate again")
+		}
 		return nil, fmt.Errorf("renew Teleport login: %w", err)
 	}
 	if response.Token == "" {
@@ -1103,7 +1109,29 @@ func decodeHTTPError(status int, body []byte) error {
 	if message == "" {
 		message = http.StatusText(status)
 	}
-	return fmt.Errorf("HTTP %d: %s", status, message)
+	return &httpResponseError{status: status, message: message}
+}
+
+type httpResponseError struct {
+	status  int
+	message string
+}
+
+func (e *httpResponseError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.status, e.message)
+}
+
+func hasHTTPStatus(err error, statuses ...int) bool {
+	var responseError *httpResponseError
+	if !errors.As(err, &responseError) {
+		return false
+	}
+	for _, status := range statuses {
+		if responseError.status == status {
+			return true
+		}
+	}
+	return false
 }
 
 func hasCookie(cookies []*http.Cookie, name string) bool {

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -15,6 +16,7 @@ import {
   Field,
   Notice,
   Panel,
+  PrimaryButton,
 } from '@/components/shell-ui';
 import { palette, radius, space, type } from '@/constants/tokens';
 import { getResponsiveLayout, responsiveLayout } from '@/lib/layout/responsive';
@@ -41,6 +43,8 @@ export default function ServersScreen() {
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshRequest, setRefreshRequest] = useState(0);
   const [terminalManager] = useState(getTerminalSessionManager);
   const [terminalSession, setTerminalSession] = useState(terminalManager.getSnapshot);
 
@@ -54,6 +58,7 @@ export default function ServersScreen() {
   useEffect(() => {
     let active = true;
     async function loadServers() {
+      if (active) setError('');
       try {
         const [nextProfile, snapshot] = await Promise.all([
           loadProfile(),
@@ -72,13 +77,7 @@ export default function ServersScreen() {
           if (!isMissingInMemorySession(currentSessionError)) {
             throw currentSessionError;
           }
-          try {
-            resolvedProfile = await client.restoreSession(snapshot);
-          } catch {
-            await clearProfile();
-            router.replace('/');
-            return;
-          }
+          resolvedProfile = await client.restoreSession(snapshot);
           nextServers = await client.listServers();
         }
         const refreshedSnapshot = await client.exportSession();
@@ -99,14 +98,17 @@ export default function ServersScreen() {
         }
         if (active) setError(messageFrom(loadError));
       } finally {
-        if (active) setLoading(false);
+        if (active) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     }
     void loadServers();
     return () => {
       active = false;
     };
-  }, [router]);
+  }, [refreshRequest, router]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -141,13 +143,30 @@ export default function ServersScreen() {
     });
   }
 
+  function refreshServers() {
+    if (refreshing) return;
+    setRefreshing(true);
+    setRefreshRequest(request => request + 1);
+  }
+
   return (
     <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={[
-        styles.content,
-        layout.compact && styles.contentCompact,
-        layout.shortViewport && styles.contentShort,
-      ]}>
+      <ScrollView
+        contentContainerStyle={[
+          styles.content,
+          layout.compact && styles.contentCompact,
+          layout.shortViewport && styles.contentShort,
+        ]}
+        refreshControl={(
+          <RefreshControl
+            colors={[palette.copper]}
+            onRefresh={refreshServers}
+            progressBackgroundColor={palette.raised}
+            refreshing={refreshing}
+            tintColor={palette.copper}
+          />
+        )}
+      >
         <View style={styles.page}>
         <View style={styles.topline}>
           <View style={styles.identity}>
@@ -183,7 +202,14 @@ export default function ServersScreen() {
           placeholder="Filter by host, role, region…"
         />
 
-        {error ? <Notice tone="error">{error}</Notice> : null}
+        {error ? (
+          <View style={styles.errorBlock}>
+            <Notice tone="error">{error}</Notice>
+            <PrimaryButton loading={refreshing} onPress={refreshServers}>
+              Retry
+            </PrimaryButton>
+          </View>
+        ) : null}
         {loading ? (
           <ActivityIndicator color={palette.copper} style={styles.loader} />
         ) : (
@@ -307,7 +333,7 @@ function isMissingInMemorySession(error: unknown) {
 }
 
 function isRejectedSession(error: unknown) {
-  return /\bHTTP 403\b|Teleport login has expired; authenticate again/i.test(
+  return /\bHTTP 401\b|Teleport login has expired|saved (?:Teleport|development) login (?:has expired|is incomplete)|decode saved Teleport login/i.test(
     messageFrom(error)
   );
 }
@@ -336,6 +362,7 @@ const styles = StyleSheet.create({
   titleWide: { fontSize: 42, lineHeight: 46 },
   titleShort: { fontSize: 30, lineHeight: 33 },
   loader: { marginVertical: space.xl },
+  errorBlock: { gap: space.sm },
   serverList: { gap: space.md },
   serverListCompact: { gap: 12 },
   serverGrid: { width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: responsiveLayout.nodeGap, alignItems: 'flex-start' },

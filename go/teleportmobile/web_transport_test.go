@@ -100,6 +100,82 @@ func TestExportSessionRenewsAndPersistsRotatedCredentials(t *testing.T) {
 	}
 }
 
+func TestFreshSessionKeepsLoginAfterTransientRenewalFailure(t *testing.T) {
+	renewAvailable := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/webapi/sessions/web/renew", func(response http.ResponseWriter, request *http.Request) {
+		if !renewAvailable {
+			http.Error(response, "proxy temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		writeTestJSON(t, response, map[string]any{
+			"type":             "bearer",
+			"token":            "renewed-token",
+			"expires_in":       300,
+			"sessionExpiresIn": int((12 * time.Hour) / time.Second),
+		})
+	})
+	server := httptest.NewTLSServer(mux)
+	defer server.Close()
+
+	transport := newTestWebTransport(t, server.URL)
+	if _, err := transport.freshSession(); err == nil || !strings.Contains(err.Error(), "temporarily unavailable") {
+		t.Fatalf("freshSession() error = %v, want transient proxy failure", err)
+	}
+	if transport.session == nil {
+		t.Fatal("transient renewal failure discarded the saved login")
+	}
+
+	renewAvailable = true
+	session, err := transport.freshSession()
+	if err != nil {
+		t.Fatalf("freshSession() after recovery error = %v", err)
+	}
+	if session.token != "renewed-token" {
+		t.Fatalf("renewed token = %q, want renewed-token", session.token)
+	}
+}
+
+func TestFreshSessionReportsRejectedRenewalAsExpired(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		http.Error(response, "access denied", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	transport := newTestWebTransport(t, server.URL)
+	_, err := transport.freshSession()
+	if err == nil || err.Error() != "the Teleport login has expired; authenticate again" {
+		t.Fatalf("freshSession() error = %v, want explicit expired-login error", err)
+	}
+}
+
+func newTestWebTransport(t *testing.T, serverURL string) *webTransport {
+	t.Helper()
+	baseURL, err := normalizeProxyURL(serverURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := newWebHTTPClient(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Jar.SetCookies(baseURL, []*http.Cookie{{
+		Name: sessionCookieName, Value: "saved-cookie", Path: "/", Secure: true,
+	}})
+	transport := newWebTransport(false)
+	transport.session = &webSession{
+		client:         client,
+		baseURL:        baseURL,
+		insecure:       true,
+		token:          "expiring-token",
+		tokenExpiresAt: time.Now().Add(time.Minute),
+		expiresAt:      time.Now().Add(12 * time.Hour),
+		username:       "alice",
+		cluster:        "example.test",
+	}
+	return transport
+}
+
 func TestRestoreSessionDoesNotDowngradeLiveCredentials(t *testing.T) {
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()

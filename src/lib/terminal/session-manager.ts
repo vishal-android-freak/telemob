@@ -203,7 +203,17 @@ class TerminalSessionManager {
   async disconnect() {
     this.connectionAttempt += 1;
     const sessionId = this.sessionId;
+    if (this.resizeTimer) {
+      clearTimeout(this.resizeTimer);
+      this.resizeTimer = undefined;
+    }
+    this.resumePending = false;
+    this.target = undefined;
     this.sessionId = '';
+    this.lastSequence = 0;
+    this.queuedEvents = [];
+    this.outputSync = undefined;
+    this.resetTerminalState();
     this.state = 'closed';
     this.error = '';
     this.publish();
