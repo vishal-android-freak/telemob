@@ -465,10 +465,13 @@ static bool prepare_snapshot_locked(
   if (ghostty_render_state_get(
           terminal->render_state,
           GHOSTTY_RENDER_STATE_DATA_DIRTY,
-          &dirty) != GHOSTTY_SUCCESS ||
-      dirty == GHOSTTY_RENDER_STATE_DIRTY_FALSE) {
+          &dirty) != GHOSTTY_SUCCESS) {
     return false;
   }
+
+  // A cursor-only control sequence can move the hardware cursor without
+  // dirtying any text row. We still need to refresh and serialize the snapshot
+  // header in that case; the cached cells below can remain untouched.
 
   GhosttyRenderStateColors colors = GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
   if (ghostty_render_state_get(
@@ -915,13 +918,20 @@ bool telemob_terminal_encode_key(
     return false;
   }
   const TelemobTerminalKey key = (TelemobTerminalKey)key_value;
+  static const uint8_t interrupt_text[] = {'c'};
+  const uint8_t* event_text = text;
+  size_t event_text_length = text_length;
+  if (key == TELEMOB_TERMINAL_KEY_INTERRUPT && event_text_length == 0) {
+    event_text = interrupt_text;
+    event_text_length = sizeof(interrupt_text);
+  }
   *output = NULL;
   *output_length = 0;
   pthread_mutex_lock(&terminal->mutex);
   ghostty_key_encoder_setopt_from_terminal(terminal->key_encoder, terminal->terminal);
   ghostty_key_event_set_action(terminal->key_event, (GhosttyKeyAction)action);
   GhosttyKey ghostty_key = key == TELEMOB_TERMINAL_KEY_TEXT
-      ? key_from_text(text, text_length)
+      ? key_from_text(event_text, event_text_length)
       : key_from_code(key);
   if (key == TELEMOB_TERMINAL_KEY_INTERRUPT) modifiers |= TELEMOB_TERMINAL_MOD_CTRL;
   ghostty_key_event_set_key(terminal->key_event, ghostty_key);
@@ -930,11 +940,11 @@ bool telemob_terminal_encode_key(
   ghostty_key_event_set_composing(terminal->key_event, false);
   ghostty_key_event_set_utf8(
       terminal->key_event,
-      text_length == 0 ? NULL : (const char*)text,
-      text_length);
+      event_text_length == 0 ? NULL : (const char*)event_text,
+      event_text_length);
   ghostty_key_event_set_unshifted_codepoint(
       terminal->key_event,
-      first_utf8_codepoint(text, text_length));
+      first_utf8_codepoint(event_text, event_text_length));
   char encoded[128];
   size_t written = 0;
   GhosttyResult result = ghostty_key_encoder_encode(

@@ -452,8 +452,10 @@ class DevelopmentTeleportClient implements TeleportClient {
     sessionId: string,
     key: string,
     text: string,
-    modifiers: TerminalModifiers
+    modifiers: TerminalModifiers,
+    action: 'press' | 'repeat' | 'release' = 'press'
   ) {
+    if (action === 'release') return Promise.resolve();
     const sequence = key === 'text'
       ? terminalTextSequence(text, modifiers)
       : terminalKeySequence(key, modifiers);

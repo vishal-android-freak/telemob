@@ -215,11 +215,21 @@ export default function TerminalScreen() {
     await manager.sendKey('enter').catch(() => undefined);
   }
 
-  function sendTerminalKey(key: string) {
-    if (connected) {
-      void manager.sendKey(key, '', modifiersRef.current).catch(() => undefined);
+  async function sendTerminalKey(key: string) {
+    const activeModifiers = modifiersRef.current;
+    if (searchOpen && (key === 'up' || key === 'down')) {
+      releaseModifiers();
+      await findTerminalText(key === 'up');
+      return;
     }
     releaseModifiers();
+    if (!connected) return;
+    try {
+      await manager.sendKey(key, '', activeModifiers, 'press');
+      await manager.sendKey(key, '', activeModifiers, 'release');
+    } catch {
+      // The session manager surfaces terminal write failures in its snapshot.
+    }
   }
 
   function sendTypedText(nextText: string) {
@@ -455,6 +465,7 @@ export default function TerminalScreen() {
       const row = Math.floor(y * dimensions.rows / height) + 1;
       if (column > dimensions.columns || row > dimensions.rows) return;
       if (session.mouseTracking) {
+        focusDirectTerminalInput();
         void manager.sendMouseTap(column, row).catch(() => undefined);
         return;
       }

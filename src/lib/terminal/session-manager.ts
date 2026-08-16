@@ -121,11 +121,16 @@ class TerminalSessionManager {
     });
   }
 
-  sendKey(key: string, text = '', modifiers: TerminalModifiers = { ctrl: false, alt: false }) {
+  sendKey(
+    key: string,
+    text = '',
+    modifiers: TerminalModifiers = { ctrl: false, alt: false },
+    action: 'press' | 'repeat' | 'release' = 'press'
+  ) {
     if (!this.sessionId || this.state !== 'connected') {
       return Promise.reject(new Error('The terminal is not connected.'));
     }
-    return this.client.sendTerminalKey(this.sessionId, key, text, modifiers).catch(error => {
+    return this.client.sendTerminalKey(this.sessionId, key, text, modifiers, action).catch(error => {
       this.setError(messageFrom(error));
       throw error;
     });
