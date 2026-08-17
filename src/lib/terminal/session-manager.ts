@@ -3,6 +3,7 @@ import { AppState, Platform, type AppStateStatus } from 'react-native';
 import { getTeleportClient, type TeleportClient } from '@/lib/teleport/client';
 import { recordNodeConnection } from '@/lib/teleport/node-preferences';
 import {
+  persistRenewedProfileSession,
   refreshSavedProfile,
   withSavedProfile,
 } from '@/lib/teleport/profile-session';
@@ -228,6 +229,7 @@ export class TerminalSessionController {
   }
 
   handleEvent(event: TerminalEvent) {
+    if (event.type === 'session') return;
     if (!this.sessionId || event.sessionId !== this.sessionId) return;
     if (event.type === 'data') {
       this.updateModes(event);
@@ -546,6 +548,14 @@ export class TerminalWorkspaceManager {
   }
 
   private handleEvent(event: TerminalEvent) {
+    if (event.type === 'session') {
+      void persistRenewedProfileSession(
+        event.profileId,
+        event.snapshot,
+        event.profile
+      ).catch(() => undefined);
+      return;
+    }
     for (const tab of this.tabs.values()) {
       if (tab.getSnapshot().sessionId === event.sessionId) {
         tab.handleEvent(event);

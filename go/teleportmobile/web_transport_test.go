@@ -100,6 +100,57 @@ func TestExportSessionRenewsAndPersistsRotatedCredentials(t *testing.T) {
 	}
 }
 
+func TestActiveTerminalRenewsAndPublishesRotatedCredentials(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/webapi/sessions/web/renew", func(response http.ResponseWriter, request *http.Request) {
+		http.SetCookie(response, &http.Cookie{
+			Name: sessionCookieName, Value: "background-cookie", Path: "/", Secure: true,
+		})
+		writeTestJSON(t, response, map[string]any{
+			"type":             "bearer",
+			"token":            "background-token",
+			"expires_in":       300,
+			"sessionExpiresIn": int((12 * time.Hour) / time.Second),
+		})
+	})
+	server := httptest.NewTLSServer(mux)
+	defer server.Close()
+
+	transport := newTestWebTransport(t, server.URL)
+	transport.session.tokenExpiresAt = time.Now().Add(renewBeforeExpiry + 10*time.Millisecond)
+	events := make(chan map[string]any, 1)
+	transport.emit = func(event map[string]any) {
+		events <- event
+	}
+	terminal := &webTerminal{
+		done:      make(chan struct{}),
+		profileID: "profile-one",
+		session:   transport.session,
+	}
+	go transport.keepTerminalSessionFresh(terminal)
+	defer close(terminal.done)
+
+	select {
+	case event := <-events:
+		if event["type"] != "session" || event["profileId"] != "profile-one" {
+			t.Fatalf("renewal event = %#v", event)
+		}
+		snapshotJSON, ok := event["snapshot"].(string)
+		if !ok {
+			t.Fatalf("renewal snapshot = %#v", event["snapshot"])
+		}
+		var snapshot persistedWebSession
+		if err := json.Unmarshal([]byte(snapshotJSON), &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Token != "background-token" || snapshot.SessionCookie != "background-cookie" {
+			t.Fatalf("background credentials were not published: %#v", snapshot)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("active terminal did not renew its Teleport web session")
+	}
+}
+
 func TestFreshSessionKeepsLoginAfterTransientRenewalFailure(t *testing.T) {
 	renewAvailable := false
 	mux := http.NewServeMux()

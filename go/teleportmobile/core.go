@@ -79,11 +79,12 @@ type authenticatedProfile struct {
 }
 
 type sessionTarget struct {
-	ServerID string `json:"serverId"`
-	Hostname string `json:"hostname"`
-	Login    string `json:"login"`
-	Columns  int    `json:"columns"`
-	Rows     int    `json:"rows"`
+	ServerID  string `json:"serverId"`
+	Hostname  string `json:"hostname"`
+	Login     string `json:"login"`
+	Columns   int    `json:"columns"`
+	Rows      int    `json:"rows"`
+	ProfileID string `json:"profileId"`
 }
 
 func NewCore() *Core {

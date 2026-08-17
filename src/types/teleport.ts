@@ -79,6 +79,12 @@ export type TeleportCapabilities = {
 
 export type TerminalEvent =
   | {
+      type: 'session';
+      profileId: string;
+      snapshot: string;
+      profile: AuthenticatedProfile;
+    }
+  | {
       type: 'data';
       sessionId: string;
       data: string;

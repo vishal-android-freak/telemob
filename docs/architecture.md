@@ -52,8 +52,11 @@ committed to the repository.
    encrypted snapshot per saved profile to Expo SecureStore and restores the
    selected profile on cold launch until Teleport rejects or expires it.
 5. A mounted app always prefers the live Go session over its last saved
-   snapshot. Bearer-token renewals are persisted after opening or closing a
-   shell, and older asynchronous writes cannot replace newer credentials.
+   snapshot. The Go core renews the bearer token while any SSH terminal is
+   active, including under Android's foreground service, and publishes every
+   rotated token and cookie for SecureStore persistence. Renewals are also
+   persisted after opening or closing a shell, and older asynchronous writes
+   cannot replace newer credentials.
 6. Authentication-dependent native calls are serialized while profiles switch,
    because the Go core has one current web-session context. Already-open SSH
    WebSockets remain independent and continue running during that switch.
@@ -145,7 +148,11 @@ registered terminal, and offers Disconnect or Disconnect all as appropriate.
 Closing one tab updates the notification without stopping the service while
 other tabs remain. If notification permission is denied, Android still requires
 the foreground service but may surface its notice only in the system's
-active-apps UI, depending on OS behavior.
+active-apps UI, depending on OS behavior. While a terminal remains registered,
+the native Go core renews Teleport's short-lived web bearer before it expires;
+when React Native is available, rotated bearer and cookie credentials are sent
+back to the encrypted profile store. Disconnecting a terminal performs one
+final export so a subsequent cold launch restores the newest credentials.
 
 iOS uses `beginBackgroundTask`, which provides only a finite execution window.
 The connection is therefore best-effort in the background and is always checked

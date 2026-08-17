@@ -3,8 +3,16 @@ export type ExpoTeleportModuleEvents = {
 };
 
 export type TerminalEventPayload = {
-  type: 'data' | 'closed' | 'error';
-  sessionId: string;
+  type: 'data' | 'closed' | 'error' | 'session';
+  sessionId?: string;
+  profileId?: string;
+  snapshot?: string;
+  profile?: {
+    proxyAddress: string;
+    username: string;
+    clusterName: string;
+    validUntil: string;
+  };
   data?: string;
   sequence?: number;
   alternateScreen?: boolean;

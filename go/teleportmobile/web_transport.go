@@ -33,6 +33,8 @@ const (
 	csrfCookieName       = "__Host-grv_csrf"
 	csrfHeaderName       = "X-CSRF-Token"
 	renewBeforeExpiry    = 3 * time.Minute
+	terminalRenewRetry   = 30 * time.Second
+	terminalProfileRetry = 15 * time.Second
 )
 
 type webTransport struct {
@@ -80,10 +82,13 @@ type webSession struct {
 }
 
 type webTerminal struct {
-	conn    *websocket.Conn
-	writeMu sync.Mutex
-	closed  sync.Once
-	pong    chan struct{}
+	conn      *websocket.Conn
+	writeMu   sync.Mutex
+	closed    sync.Once
+	pong      chan struct{}
+	done      chan struct{}
+	profileID string
+	session   *webSession
 }
 
 type persistedWebSession struct {
@@ -447,6 +452,10 @@ func (w *webTransport) exportSession() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return persistedSessionJSON(session)
+}
+
+func persistedSessionJSON(session *webSession) (string, error) {
 	cookie, err := findCookie(session.client.Jar.Cookies(session.baseURL), sessionCookieName)
 	if err != nil {
 		return "", err
@@ -622,7 +631,13 @@ func (w *webTransport) openSession(targetJSON string) (string, error) {
 		conn.Close()
 		return "", err
 	}
-	terminal := &webTerminal{conn: conn, pong: make(chan struct{}, 1)}
+	terminal := &webTerminal{
+		conn:      conn,
+		pong:      make(chan struct{}, 1),
+		done:      make(chan struct{}),
+		profileID: target.ProfileID,
+		session:   session,
+	}
 	conn.SetPongHandler(func(string) error {
 		select {
 		case terminal.pong <- struct{}{}:
@@ -634,6 +649,7 @@ func (w *webTransport) openSession(targetJSON string) (string, error) {
 	w.terminals[sessionID] = terminal
 	w.mu.Unlock()
 	go w.readTerminal(sessionID, terminal)
+	go w.keepTerminalSessionFresh(terminal)
 
 	return marshal(map[string]any{"id": sessionID, "target": target})
 }
@@ -704,6 +720,7 @@ func (w *webTransport) closeSession(sessionID string) {
 		return
 	}
 	terminal.closed.Do(func() {
+		close(terminal.done)
 		terminal.writeMu.Lock()
 		_ = terminal.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "closed on device"), time.Now().Add(time.Second))
 		terminal.writeMu.Unlock()
@@ -749,6 +766,7 @@ func (w *webTransport) readTerminal(sessionID string, terminal *webTerminal) {
 
 func (w *webTransport) finishTerminal(sessionID string, terminal *webTerminal, reason, errorMessage string) {
 	terminal.closed.Do(func() {
+		close(terminal.done)
 		_ = terminal.conn.Close()
 		w.mu.Lock()
 		if current, ok := w.terminals[sessionID]; ok && current == terminal {
@@ -760,6 +778,68 @@ func (w *webTransport) finishTerminal(sessionID string, terminal *webTerminal, r
 		}
 		w.sendEvent(map[string]any{"type": "closed", "sessionId": sessionID, "reason": reason})
 	})
+}
+
+func (w *webTransport) keepTerminalSessionFresh(terminal *webTerminal) {
+	for {
+		w.mu.Lock()
+		current := w.session
+		w.mu.Unlock()
+
+		wait := terminalProfileRetry
+		if current != nil && sameSessionIdentity(current, terminal.session) {
+			wait = time.Until(current.tokenExpiresAt.Add(-renewBeforeExpiry))
+			if wait < time.Second {
+				wait = time.Second
+			}
+		}
+
+		if !waitForTerminalRetry(terminal.done, wait) {
+			return
+		}
+
+		w.mu.Lock()
+		before := w.session
+		w.mu.Unlock()
+		if before == nil || !sameSessionIdentity(before, terminal.session) {
+			continue
+		}
+
+		renewed, err := w.freshSession()
+		if err != nil {
+			if strings.Contains(err.Error(), "login has expired") {
+				return
+			}
+			if !waitForTerminalRetry(terminal.done, terminalRenewRetry) {
+				return
+			}
+			continue
+		}
+		if renewed == before || !sameSessionIdentity(renewed, terminal.session) {
+			continue
+		}
+		snapshot, err := persistedSessionJSON(renewed)
+		if err != nil {
+			continue
+		}
+		w.sendEvent(map[string]any{
+			"type":      "session",
+			"profileId": terminal.profileID,
+			"snapshot":  snapshot,
+			"profile":   profileForWebSession(renewed),
+		})
+	}
+}
+
+func waitForTerminalRetry(done <-chan struct{}, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (w *webTransport) freshSession() (*webSession, error) {

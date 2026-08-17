@@ -57,6 +57,19 @@ export function refreshSavedProfile(profileId: string) {
   });
 }
 
+export function persistRenewedProfileSession(
+  profileId: string,
+  snapshot: string,
+  profile: AuthenticatedProfile
+) {
+  return withProfileLock(async () => {
+    const saved = await loadSavedProfile(profileId);
+    if (!saved || !sameProfileIdentity(saved.profile, profile)) return null;
+    await saveProfileSession(profileId, snapshot, profile);
+    return profile;
+  });
+}
+
 export function clearNativeAuthentication() {
   return withProfileLock(async client => {
     await client.logout();
@@ -97,4 +110,10 @@ async function restoreProfileIfNeeded(
   nativeProfileId = profileId;
   await saveProfileSession(profileId, saved.sessionSnapshot, restored);
   return restored;
+}
+
+function sameProfileIdentity(left: AuthenticatedProfile, right: AuthenticatedProfile) {
+  return left.proxyAddress === right.proxyAddress
+    && left.username === right.username
+    && left.clusterName === right.clusterName;
 }
