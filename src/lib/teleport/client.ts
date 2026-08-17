@@ -314,6 +314,8 @@ class DevelopmentTeleportClient implements TeleportClient {
   private listeners = new Set<(event: TerminalEvent) => void>();
   private outputs = new Map<string, TerminalOutputSnapshot>();
   private sessions = new Map<string, { target: SessionTarget; input: string }>();
+  private pendingLogins = new Map<string, LoginRequest>();
+  private currentProfile: AuthenticatedProfile | undefined;
 
   async capabilities(): Promise<TeleportCapabilities> {
     return {
@@ -325,10 +327,13 @@ class DevelopmentTeleportClient implements TeleportClient {
   }
 
   async exportSession() {
+    if (!this.currentProfile) {
+      throw new Error('Sign in before saving this development profile.');
+    }
     return JSON.stringify({
       version: 1,
       development: true,
-      profile: developmentProfile(),
+      profile: this.currentProfile,
     });
   }
 
@@ -337,7 +342,8 @@ class DevelopmentTeleportClient implements TeleportClient {
     if (!snapshot?.development || !snapshot?.profile) {
       throw new Error('The saved development login is invalid.');
     }
-    return snapshot.profile as AuthenticatedProfile;
+    this.currentProfile = snapshot.profile as AuthenticatedProfile;
+    return this.currentProfile;
   }
 
   async logout() {
@@ -351,6 +357,8 @@ class DevelopmentTeleportClient implements TeleportClient {
     }
     this.sessions.clear();
     this.outputs.clear();
+    this.pendingLogins.clear();
+    this.currentProfile = undefined;
   }
 
   async beginLogin(request: LoginRequest): Promise<AuthChallenge> {
@@ -361,7 +369,8 @@ class DevelopmentTeleportClient implements TeleportClient {
     if (!request.password) {
       throw new Error('Enter your Teleport password.');
     }
-    const challengeId = `challenge-${Date.now()}`;
+    const challengeId = `challenge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this.pendingLogins.set(challengeId, { ...request });
     if (request.method === 'passkey') {
       return {
         kind: 'passkey',
@@ -374,18 +383,24 @@ class DevelopmentTeleportClient implements TeleportClient {
 
   async finishTotp(challengeId: string, code: string) {
     await delay(360);
-    if (!challengeId || !/^\d{6}$/.test(code)) {
+    const request = this.pendingLogins.get(challengeId);
+    if (!request || !/^\d{6}$/.test(code)) {
       throw new Error('Enter the six-digit code from your authenticator.');
     }
-    return developmentProfile();
+    this.pendingLogins.delete(challengeId);
+    this.currentProfile = developmentProfile(request);
+    return this.currentProfile;
   }
 
   async finishPasskey(challengeId: string) {
     await delay(520);
-    if (!challengeId) {
+    const request = this.pendingLogins.get(challengeId);
+    if (!request) {
       throw new Error('The passkey challenge expired. Start again.');
     }
-    return developmentProfile();
+    this.pendingLogins.delete(challengeId);
+    this.currentProfile = developmentProfile(request);
+    return this.currentProfile;
   }
 
   async listServers(): Promise<TeleportServer[]> {
@@ -420,7 +435,10 @@ class DevelopmentTeleportClient implements TeleportClient {
 
   async openSession(target: SessionTarget): Promise<SessionHandle> {
     await delay(280);
-    const session = { id: `session-${Date.now()}`, target };
+    const session = {
+      id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      target,
+    };
     this.outputs.set(session.id, {
       sessionId: session.id,
       open: true,
@@ -550,11 +568,12 @@ class DevelopmentTeleportClient implements TeleportClient {
   }
 }
 
-function developmentProfile(): AuthenticatedProfile {
+function developmentProfile(request: LoginRequest): AuthenticatedProfile {
+  const proxyAddress = request.proxyAddress.trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
   return {
-    proxyAddress: 'teleport.example.com:443',
-    username: 'operator',
-    clusterName: 'teleport.example.com',
+    proxyAddress,
+    username: request.username.trim(),
+    clusterName: proxyAddress.replace(/:\d+$/, ''),
     validUntil: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString(),
   };
 }

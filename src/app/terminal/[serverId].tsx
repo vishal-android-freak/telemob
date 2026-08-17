@@ -1,7 +1,6 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Alert,
   type GestureResponderEvent,
   Keyboard,
   LayoutChangeEvent,
@@ -18,6 +17,7 @@ import {
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { ThemedConfirmDialog } from '@/components/themed-confirm-dialog';
 import {
   ExpoTeleportTerminalView,
   type ExpoTeleportTerminalViewHandle,
@@ -30,7 +30,11 @@ import {
   TERMINAL_KEYS,
   type TerminalModifiers,
 } from '@/lib/terminal/keys';
-import { getTerminalSessionManager } from '@/lib/terminal/session-manager';
+import {
+  getTerminalWorkspaceManager,
+  type TerminalSessionController,
+  type TerminalWorkspaceManager,
+} from '@/lib/terminal/session-manager';
 
 const SHELL_TERMINAL_FONT_SIZE = 7.5;
 const FULL_SCREEN_TERMINAL_FONT_SIZE = 11;
@@ -43,18 +47,34 @@ const INITIAL_FONT_METRICS = {
 const TERMINAL_TAP_SLOP = 8;
 const TERMINAL_SELECTION_HOLD_MS = 450;
 
-export default function TerminalScreen() {
+export default function TerminalRoute() {
   const router = useRouter();
-  const params = useLocalSearchParams<{
-    serverId: string;
-    hostname: string;
-    login: string;
-  }>();
+  const params = useLocalSearchParams<{ serverId: string }>();
+  const [workspace] = useState(getTerminalWorkspaceManager);
+  const manager = workspace.getSession(params.serverId);
+
+  useEffect(() => {
+    if (!manager) router.back();
+  }, [manager, router]);
+
+  if (!manager) return <SafeAreaView style={styles.safeArea} />;
+
+  return <TerminalScreen key={manager.tabId} manager={manager} workspace={workspace} />;
+}
+
+function TerminalScreen({
+  manager,
+  workspace,
+}: {
+  manager: TerminalSessionController;
+  workspace: TerminalWorkspaceManager;
+}) {
+  const router = useRouter();
   const { height: windowHeight, width: windowWidth } = useWindowDimensions();
   const layout = getResponsiveLayout(windowWidth, windowHeight);
   const [largeTerminal] = useState(layout.tablet);
-  const [manager] = useState(getTerminalSessionManager);
   const [session, setSession] = useState(manager.getSnapshot);
+  const [terminalWorkspace, setTerminalWorkspace] = useState(workspace.getSnapshot);
   const [dimensions, setDimensions] = useState({ columns: 0, rows: 0 });
   const [viewportReady, setViewportReady] = useState(false);
   const [fontMetrics, setFontMetrics] = useState(INITIAL_FONT_METRICS);
@@ -63,7 +83,9 @@ export default function TerminalScreen() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchStatus, setSearchStatus] = useState('');
-  const [disconnecting, setDisconnecting] = useState(false);
+  const [pendingDisconnectTabId, setPendingDisconnectTabId] = useState<string | null>(null);
+  const [disconnectingTabId, setDisconnectingTabId] = useState<string | null>(null);
+  const [pendingLink, setPendingLink] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<TerminalModifiers>({ ctrl: false, alt: false });
   const modifiersRef = useRef<TerminalModifiers>({ ctrl: false, alt: false });
   const dimensionsRef = useRef<{ columns: number; rows: number } | null>(null);
@@ -95,22 +117,27 @@ export default function TerminalScreen() {
   const remoteMouseLastCellRef = useRef<{ column: number; row: number } | null>(null);
   const remoteMouseWriteRef = useRef<Promise<void>>(Promise.resolve());
   const connected = session.state === 'connected';
+  const pendingDisconnectTab = terminalWorkspace.tabs.find(
+    tab => tab.tabId === pendingDisconnectTabId
+  );
 
   useEffect(() => {
     const unsubscribe = manager.subscribe(setSession);
+    const unsubscribeWorkspace = workspace.subscribe(setTerminalWorkspace);
     const size = dimensionsRef.current;
-    if (!viewportReady || !size) return unsubscribe;
-    manager.attach({
-      serverId: params.serverId,
-      hostname: params.hostname,
-      login: params.login,
-      ...size,
-    }, size);
+    if (!viewportReady || !size) {
+      return () => {
+        unsubscribe();
+        unsubscribeWorkspace();
+      };
+    }
+    manager.attach(size);
     return () => {
       unsubscribe();
+      unsubscribeWorkspace();
       manager.detach();
     };
-  }, [manager, params.hostname, params.login, params.serverId, viewportReady]);
+  }, [manager, viewportReady, workspace]);
 
   useEffect(() => {
     const shown = Keyboard.addListener('keyboardDidShow', () => {
@@ -147,8 +174,13 @@ export default function TerminalScreen() {
       return;
     }
     leftTerminalRef.current = true;
-    router.back();
-  }, [router, session.state]);
+    const nextTabId = workspace.dismiss(session.tabId);
+    if (nextTabId) {
+      router.replace({ pathname: '/terminal/[serverId]', params: { serverId: nextTabId } });
+    } else {
+      router.back();
+    }
+  }, [router, session.state, session.tabId, workspace]);
 
   const applyTerminalSize = useCallback((width: number, height: number, narrowTUI: boolean) => {
     const fontSize = narrowTUI
@@ -475,19 +507,7 @@ export default function TerminalScreen() {
             focusDirectTerminalInput();
             return manager.sendMouseTap(column, row).then(() => undefined);
           }
-          Alert.alert(
-            'Open terminal link?',
-            uri,
-            [
-              { text: 'Cancel', style: 'cancel' },
-              {
-                text: 'Open',
-                onPress: () => {
-                  void Linking.openURL(uri).catch(() => undefined);
-                },
-              },
-            ]
-          );
+          setPendingLink(uri);
           return undefined;
         })
         .catch(() => {
@@ -506,14 +526,38 @@ export default function TerminalScreen() {
     }
   }
 
-  async function disconnectTerminal() {
-    if (disconnecting) return;
-    setDisconnecting(true);
+  async function disconnectTerminal(tabId: string) {
+    if (disconnectingTabId) return;
+    const closingActiveTab = tabId === session.tabId;
+    setDisconnectingTabId(tabId);
+    if (closingActiveTab) leftTerminalRef.current = true;
     try {
-      await manager.disconnect();
+      const nextTabId = await workspace.disconnect(tabId);
+      setPendingDisconnectTabId(null);
+      if (closingActiveTab) {
+        if (nextTabId) {
+          router.replace({ pathname: '/terminal/[serverId]', params: { serverId: nextTabId } });
+        } else {
+          router.back();
+        }
+      }
     } catch {
-      setDisconnecting(false);
+      if (closingActiveTab) leftTerminalRef.current = false;
+    } finally {
+      setDisconnectingTabId(null);
     }
+  }
+
+  function requestDisconnectTerminal(tabId: string) {
+    dismissTerminalKeyboard();
+    setPendingDisconnectTabId(tabId);
+  }
+
+  function switchTerminal(tabId: string) {
+    if (tabId === session.tabId) return;
+    dismissTerminalKeyboard();
+    workspace.activate(tabId);
+    router.setParams({ serverId: tabId });
   }
 
   async function pasteClipboard() {
@@ -581,51 +625,81 @@ export default function TerminalScreen() {
         style={styles.flex}
       >
         <View style={styles.shell}>
-          <View style={[
-            styles.header,
-            layout.shortViewport && styles.headerShort,
-            layout.wide && styles.headerWide,
-          ]}>
+          <View style={styles.tabBar}>
             <Pressable
               accessibilityLabel="Back to nodes"
               accessibilityRole="button"
               hitSlop={12}
               onPress={() => router.back()}
-              style={[styles.backButton, layout.shortViewport && styles.backButtonShort]}
+              style={({ pressed }) => [styles.backButton, pressed && styles.terminalTabPressed]}
             >
-              <Text style={[styles.back, layout.shortViewport && styles.backShort]}>‹</Text>
+              <Text style={styles.back}>‹</Text>
             </Pressable>
-            <View style={styles.target}>
-              <Text numberOfLines={1} style={styles.targetText}>
-                {session.terminalTitle || (
-                  <><Text style={styles.login}>{params.login}@</Text>{params.hostname}</>
-                )}
-              </Text>
-            </View>
-            <View style={styles.headerActions}>
-              <View style={styles.sessionState}>
-                <Text style={styles.dimensions}>
-                  {viewportReady ? `${dimensions.columns}×${dimensions.rows}` : 'measuring'}
-                </Text>
-                <View style={[styles.liveDot, !connected && styles.liveDotWaiting]} />
-              </View>
+            <ScrollView
+              contentContainerStyle={styles.tabRail}
+              horizontal
+              keyboardShouldPersistTaps="always"
+              showsHorizontalScrollIndicator={false}
+              style={styles.tabScroller}
+            >
+              {terminalWorkspace.tabs.map(tab => (
+                <View
+                  key={tab.tabId}
+                  style={[
+                    styles.terminalTab,
+                    tab.tabId === session.tabId && styles.terminalTabActive,
+                  ]}
+                >
+                  <Pressable
+                    accessibilityLabel={`Open ${tab.target.login} at ${tab.target.hostname}`}
+                    accessibilityRole="tab"
+                    accessibilityState={{ selected: tab.tabId === session.tabId }}
+                    onPress={() => switchTerminal(tab.tabId)}
+                    style={({ pressed }) => [
+                      styles.terminalTabMain,
+                      pressed && styles.terminalTabPressed,
+                    ]}
+                  >
+                    <View style={[
+                      styles.terminalTabDot,
+                      tab.state !== 'connected' && styles.terminalTabDotWaiting,
+                      tab.unread && styles.terminalTabDotUnread,
+                    ]} />
+                    <Text numberOfLines={1} style={[
+                      styles.terminalTabText,
+                      tab.tabId === session.tabId && styles.terminalTabTextActive,
+                    ]}>
+                      {tab.target.login}@{tab.target.hostname}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityLabel={`Disconnect ${tab.target.login} at ${tab.target.hostname}`}
+                    accessibilityRole="button"
+                    disabled={disconnectingTabId === tab.tabId}
+                    hitSlop={4}
+                    onPress={() => requestDisconnectTerminal(tab.tabId)}
+                    style={({ pressed }) => [
+                      styles.closeTabButton,
+                      disconnectingTabId === tab.tabId && styles.closeTabButtonDisabled,
+                      pressed && styles.closeTabButtonPressed,
+                    ]}
+                  >
+                    <Text style={styles.closeTabText}>×</Text>
+                  </Pressable>
+                </View>
+              ))}
               <Pressable
-                accessibilityLabel="Disconnect terminal session"
+                accessibilityLabel="Open another terminal"
                 accessibilityRole="button"
-                disabled={disconnecting}
-                hitSlop={6}
-                onPress={disconnectTerminal}
+                onPress={() => router.back()}
                 style={({ pressed }) => [
-                  styles.disconnectButton,
-                  disconnecting && styles.disconnectButtonDisabled,
-                  pressed && styles.disconnectButtonPressed,
+                  styles.newTabButton,
+                  pressed && styles.terminalTabPressed,
                 ]}
               >
-                <Text style={styles.disconnectText}>
-                  {disconnecting ? 'Closing…' : 'Disconnect'}
-                </Text>
+                <Text style={styles.newTabText}>＋</Text>
               </Pressable>
-            </View>
+            </ScrollView>
           </View>
 
           <View
@@ -830,6 +904,33 @@ export default function TerminalScreen() {
           </View>
         </View>
       </KeyboardAvoidingView>
+      <ThemedConfirmDialog
+        busy={disconnectingTabId === pendingDisconnectTabId}
+        confirmLabel="Disconnect"
+        eyebrow="TERMINAL SESSION"
+        message={pendingDisconnectTab
+          ? `This closes the running shell for ${pendingDisconnectTab.target.login}@${pendingDisconnectTab.target.hostname}. Other tabs stay connected.`
+          : ''}
+        onCancel={() => setPendingDisconnectTabId(null)}
+        onConfirm={() => {
+          if (pendingDisconnectTabId) void disconnectTerminal(pendingDisconnectTabId);
+        }}
+        title="Disconnect this shell?"
+        visible={Boolean(pendingDisconnectTab)}
+      />
+      <ThemedConfirmDialog
+        confirmLabel="Open link"
+        eyebrow="TERMINAL LINK"
+        message={pendingLink ?? ''}
+        onCancel={() => setPendingLink(null)}
+        onConfirm={() => {
+          const uri = pendingLink;
+          setPendingLink(null);
+          if (uri) void Linking.openURL(uri).catch(() => undefined);
+        }}
+        title="Open this link?"
+        visible={Boolean(pendingLink)}
+      />
     </SafeAreaView>
   );
 }
@@ -884,39 +985,85 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   safeArea: { flex: 1, backgroundColor: palette.terminal },
   shell: { flex: 1, backgroundColor: palette.terminal },
-  header: {
-    minHeight: 44,
+  tabBar: {
+    height: 44,
     flexDirection: 'row',
     alignItems: 'center',
     borderBottomColor: palette.rule,
     borderBottomWidth: StyleSheet.hairlineWidth,
     backgroundColor: palette.deep,
-    paddingHorizontal: space.sm,
   },
-  headerShort: { minHeight: 36, paddingHorizontal: space.xs },
-  headerWide: { paddingHorizontal: space.md },
-  backButton: { width: 40, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center' },
-  backButtonShort: { width: 34 },
-  back: { color: palette.copper, fontFamily: type.monoMedium, fontSize: 30, lineHeight: 32 },
-  backShort: { fontSize: 25, lineHeight: 27 },
-  target: { flex: 1, minWidth: 0, alignItems: 'center' },
-  targetText: { color: palette.porcelain, fontFamily: type.monoStrong, fontSize: 11 },
-  login: { color: palette.quiet, fontFamily: type.mono },
-  headerActions: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
-  sessionState: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 7 },
-  dimensions: { color: palette.quiet, fontFamily: type.mono, fontSize: 8 },
-  liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: palette.signal },
-  liveDotWaiting: { backgroundColor: palette.warning },
-  disconnectButton: {
-    minHeight: 28,
+  backButton: {
+    width: 42,
+    flexShrink: 0,
+    zIndex: 2,
+    alignSelf: 'stretch',
+    alignItems: 'center',
     justifyContent: 'center',
-    borderColor: palette.danger,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: space.sm,
+    borderRightColor: palette.rule,
+    borderRightWidth: StyleSheet.hairlineWidth,
+    backgroundColor: palette.deep,
   },
-  disconnectButtonDisabled: { opacity: 0.55 },
-  disconnectButtonPressed: { backgroundColor: palette.raised },
-  disconnectText: { color: palette.danger, fontFamily: type.monoMedium, fontSize: 9 },
+  back: { color: palette.copper, fontFamily: type.monoMedium, fontSize: 28, lineHeight: 30 },
+  tabScroller: {
+    flex: 1,
+    minWidth: 0,
+    alignSelf: 'stretch',
+    overflow: 'hidden',
+  },
+  tabRail: {
+    flexGrow: 1,
+    alignItems: 'stretch',
+    gap: 3,
+    backgroundColor: palette.deep,
+    paddingRight: 3,
+  },
+  terminalTab: {
+    minWidth: 142,
+    maxWidth: 200,
+    alignSelf: 'stretch',
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 0,
+    borderBottomColor: 'transparent',
+    borderBottomWidth: 2,
+    backgroundColor: palette.panel,
+  },
+  terminalTabActive: { borderBottomColor: palette.copper, backgroundColor: palette.raised },
+  terminalTabPressed: { opacity: 0.7 },
+  terminalTabMain: {
+    flex: 1,
+    minWidth: 0,
+    alignSelf: 'stretch',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingLeft: space.sm,
+  },
+  terminalTabDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: palette.signal },
+  terminalTabDotWaiting: { backgroundColor: palette.warning },
+  terminalTabDotUnread: { backgroundColor: palette.copper },
+  terminalTabText: { flex: 1, minWidth: 0, color: palette.mist, fontFamily: type.mono, fontSize: 8 },
+  terminalTabTextActive: { color: palette.porcelain, fontFamily: type.monoMedium },
+  closeTabButton: {
+    width: 34,
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderLeftColor: palette.rule,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+  },
+  closeTabButtonDisabled: { opacity: 0.45 },
+  closeTabButtonPressed: { backgroundColor: palette.deep },
+  closeTabText: { color: palette.danger, fontFamily: type.monoMedium, fontSize: 17, lineHeight: 19 },
+  newTabButton: {
+    width: 42,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderColor: palette.rule,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  newTabText: { color: palette.copper, fontFamily: type.monoStrong, fontSize: 17 },
   terminalViewport: { flex: 1, overflow: 'hidden', backgroundColor: palette.terminal },
   nativeTerminal: { flex: 1 },
   directInput: { position: 'absolute', width: 1, height: 1, left: 0, bottom: 0, opacity: 0 },

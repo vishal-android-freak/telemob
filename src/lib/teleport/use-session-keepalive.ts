@@ -1,11 +1,8 @@
 import { useEffect } from 'react';
 import { AppState } from 'react-native';
 
-import { getTeleportClient } from '@/lib/teleport/client';
-import {
-  loadSessionSnapshot,
-  saveSessionSnapshot,
-} from '@/lib/teleport/profile-store';
+import { refreshSavedProfile } from '@/lib/teleport/profile-session';
+import { loadActiveSavedProfile } from '@/lib/teleport/profile-store';
 
 const checkIntervalMs = 15_000;
 
@@ -18,10 +15,9 @@ export function useTeleportSessionKeepAlive() {
       if (!mounted || refreshing || AppState.currentState !== 'active') return;
       refreshing = true;
       try {
-        const saved = await loadSessionSnapshot();
+        const saved = await loadActiveSavedProfile();
         if (!saved) return;
-        const renewed = await getTeleportClient().exportSession();
-        if (renewed !== saved) await saveSessionSnapshot(renewed);
+        await refreshSavedProfile(saved.id);
       } catch {
         // Screens that need authentication surface expiry and route to login.
       } finally {

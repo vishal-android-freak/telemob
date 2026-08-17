@@ -29,16 +29,20 @@ before relying on it for critical access.
 - Browser MFA for passkeys on supported Teleport clusters.
 - Encrypted on-device restoration of the Teleport web session; passwords are
   never persisted.
+- Multiple saved Teleport profiles with independent encrypted session snapshots,
+  profile naming, switching, and removal.
 - RBAC-filtered node discovery, search, and SSH-login selection.
 - Interactive PTY sessions over Teleport's authenticated WebSocket transport.
+- Multiple concurrent terminal tabs with independent connection state, parser
+  state, scrollback, dimensions, and unread activity.
 - A full-screen terminal with direct typing, paste, Ctrl/Alt modifiers,
   navigation and editing keys, F1–F12, and optional whole-line input.
 - Terminal mouse clicks and scroll events for compatible full-screen TUI apps.
 - Dynamic PTY sizing based on the actual mobile viewport.
 - Responsive phone and tablet layouts in portrait and landscape, including
   multi-column node discovery and native iPad support.
-- Android foreground-service retention with a visible notification and
-  Disconnect action.
+- Android foreground-service retention with a visible session count, deep link
+  to the latest terminal, and Disconnect/Disconnect all action.
 - Best-effort iOS background retention and connection verification on resume.
 - An explicit, disabled-by-default insecure TLS option for development clusters
   using self-signed certificates.
@@ -50,11 +54,13 @@ deterministic preview transport because they cannot load Telemob's custom native
 module. Set `EXPO_PUBLIC_TELEPORT_NATIVE_CORE=0` to force the preview transport
 inside a native development build.
 
-The active SSH session is owned below the React screen. Navigating away or
-backgrounding the app does not intentionally close it. Output is sequenced and
-retained in a bounded replay window; on resume, Telemob fills missed output,
-checks liveness, and reconnects with a fresh terminal parser when necessary.
-No tmux, screen, Mosh, agent, or other target-server software is required.
+Active SSH sessions are owned by a process-wide terminal workspace below the
+React screens. Navigating away, switching profiles, switching terminal tabs, or
+backgrounding the app does not intentionally close them. Each tab retains its
+own sequenced output and bounded replay window; on resume, Telemob fills missed
+output, checks liveness, and reconnects with a fresh terminal parser when
+necessary. No tmux, screen, Mosh, agent, or other target-server software is
+required.
 
 ## Requirements
 

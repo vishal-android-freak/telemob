@@ -1,5 +1,5 @@
-import { useRouter } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { type Href, useFocusEffect, useRouter } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -18,80 +18,105 @@ import {
   Panel,
   PrimaryButton,
 } from '@/components/shell-ui';
+import { ThemedConfirmDialog } from '@/components/themed-confirm-dialog';
 import { palette, radius, space, type } from '@/constants/tokens';
 import { getResponsiveLayout, responsiveLayout } from '@/lib/layout/responsive';
-import { getTeleportClient } from '@/lib/teleport/client';
 import {
-  clearProfile,
-  loadProfile,
-  loadSessionSnapshot,
-  saveSessionSnapshot,
+  activateSavedProfile,
+  signOutSavedProfile,
+  withSavedProfile,
+} from '@/lib/teleport/profile-session';
+import {
+  listSavedProfiles,
+  loadActiveSavedProfile,
 } from '@/lib/teleport/profile-store';
 import {
-  getTerminalSessionManager,
-  type TerminalConnectionState,
+  getTerminalWorkspaceManager,
+  isActiveTerminalState,
 } from '@/lib/terminal/session-manager';
-import type { AuthenticatedProfile, TeleportServer } from '@/types/teleport';
+import type { SavedTeleportProfile, TeleportServer } from '@/types/teleport';
 
 export default function ServersScreen() {
   const router = useRouter();
   const { height, width } = useWindowDimensions();
   const layout = getResponsiveLayout(width, height);
   const [listWidth, setListWidth] = useState(0);
-  const [profile, setProfile] = useState<AuthenticatedProfile | null>(null);
+  const [savedProfile, setSavedProfile] = useState<SavedTeleportProfile | null>(null);
+  const [profiles, setProfiles] = useState<SavedTeleportProfile[]>([]);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [servers, setServers] = useState<TeleportServer[]>([]);
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshRequest, setRefreshRequest] = useState(0);
-  const [terminalManager] = useState(getTerminalSessionManager);
-  const [terminalSession, setTerminalSession] = useState(terminalManager.getSnapshot);
+  const [signOutDialogOpen, setSignOutDialogOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [workspace] = useState(getTerminalWorkspaceManager);
+  const [terminalWorkspace, setTerminalWorkspace] = useState(workspace.getSnapshot);
+  const activeProfileIdRef = useRef<string | null>(null);
+  const loadedOnceRef = useRef(false);
 
   useEffect(() => {
-    const unsubscribe = terminalManager.subscribe(setTerminalSession);
+    activeProfileIdRef.current = savedProfile?.id ?? null;
+  }, [savedProfile?.id]);
+
+  useFocusEffect(useCallback(() => {
+    if (!loadedOnceRef.current) return;
+    let mounted = true;
+    void loadActiveSavedProfile().then(active => {
+      if (!mounted || active?.id === activeProfileIdRef.current) return;
+      setLoading(true);
+      setRefreshRequest(request => request + 1);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []));
+
+  useEffect(() => {
+    const unsubscribe = workspace.subscribe(setTerminalWorkspace);
     return () => {
       unsubscribe();
     };
-  }, [terminalManager]);
+  }, [workspace]);
 
   useEffect(() => {
     let active = true;
     async function loadServers() {
       if (active) setError('');
       try {
-        const [nextProfile, snapshot] = await Promise.all([
-          loadProfile(),
-          loadSessionSnapshot(),
+        const [nextProfile, nextProfiles] = await Promise.all([
+          loadActiveSavedProfile(),
+          listSavedProfiles(),
         ]);
-        if (!nextProfile || !snapshot) {
+        if (!nextProfile) {
           router.replace('/');
           return;
         }
-        const client = getTeleportClient();
-        let resolvedProfile = nextProfile;
-        let nextServers: TeleportServer[];
-        try {
-          nextServers = await client.listServers();
-        } catch (currentSessionError) {
-          if (!isMissingInMemorySession(currentSessionError)) {
-            throw currentSessionError;
-          }
-          resolvedProfile = await client.restoreSession(snapshot);
-          nextServers = await client.listServers();
-        }
-        const refreshedSnapshot = await client.exportSession();
-        await saveSessionSnapshot(refreshedSnapshot);
+        const nextServers = await withSavedProfile(
+          nextProfile.id,
+          client => client.listServers()
+        );
         if (!active) return;
-        setProfile(resolvedProfile);
+        setSavedProfile(nextProfile);
+        setProfiles(nextProfiles);
         setServers(Array.isArray(nextServers) ? nextServers : []);
       } catch (loadError) {
         if (isRejectedSession(loadError)) {
-          await Promise.all([clearProfile(), getTeleportClient().logout()]);
+          const rejected = await loadActiveSavedProfile();
+          if (rejected) {
+            await workspace.disconnectProfile(rejected.id);
+            await signOutSavedProfile(rejected.id);
+          }
           if (active) {
             router.replace({
               pathname: '/',
-              params: { reason: 'session-expired' },
+              params: {
+                mode: 'signin',
+                profileId: rejected?.id,
+                reason: 'session-expired',
+              },
             });
           }
           return;
@@ -99,6 +124,7 @@ export default function ServersScreen() {
         if (active) setError(messageFrom(loadError));
       } finally {
         if (active) {
+          loadedOnceRef.current = true;
           setLoading(false);
           setRefreshing(false);
         }
@@ -108,7 +134,7 @@ export default function ServersScreen() {
     return () => {
       active = false;
     };
-  }, [refreshRequest, router]);
+  }, [refreshRequest, router, workspace]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -121,9 +147,11 @@ export default function ServersScreen() {
     );
   }, [query, servers]);
 
-  const activeTarget = isActiveTerminalState(terminalSession.state)
-    ? terminalSession.target
-    : undefined;
+  const activeTabs = savedProfile
+    ? terminalWorkspace.tabs.filter(tab =>
+        tab.profileId === savedProfile.id && isActiveTerminalState(tab.state)
+      )
+    : [];
   const cardWidth = listWidth > 0
     ? Math.floor(
         (listWidth - responsiveLayout.nodeGap * (layout.nodeColumns - 1))
@@ -131,16 +159,79 @@ export default function ServersScreen() {
       )
     : undefined;
 
-  async function signOut() {
-    await Promise.all([clearProfile(), getTeleportClient().logout()]);
-    router.replace('/');
+  function confirmSignOut() {
+    if (!savedProfile) return;
+    setSignOutDialogOpen(true);
   }
 
-  function openServer(server: TeleportServer, login: string) {
+  async function signOutCurrentProfile() {
+    if (!savedProfile) return;
+    setError('');
+    setSigningOut(true);
+    try {
+      await workspace.disconnectProfile(savedProfile.id);
+      await signOutSavedProfile(savedProfile.id);
+      setProfileMenuOpen(false);
+      setSignOutDialogOpen(false);
+      router.replace({
+        pathname: '/',
+        params: {
+          mode: 'signin',
+          profileId: savedProfile.id,
+          reason: 'signed-out',
+        },
+      });
+    } catch (profileError) {
+      setError(messageFrom(profileError));
+    } finally {
+      setSigningOut(false);
+    }
+  }
+
+  function openServer(server: TeleportServer, login: string, forceNew = false) {
+    if (!savedProfile) return;
+    const session = (!forceNew
+      ? workspace.findSession(savedProfile.id, server.id, login)
+      : undefined)
+      ?? workspace.createSession(savedProfile.id, {
+        serverId: server.id,
+        hostname: server.hostname,
+        login,
+      });
     router.push({
       pathname: '/terminal/[serverId]',
-      params: { serverId: server.id, hostname: server.hostname, login },
+      params: { serverId: session.tabId },
     });
+  }
+
+  async function switchProfile(profileId: string) {
+    if (profileId === savedProfile?.id) {
+      setProfileMenuOpen(false);
+      return;
+    }
+    setError('');
+    const target = profiles.find(profile => profile.id === profileId);
+    if (target && !target.sessionSnapshot) {
+      setProfileMenuOpen(false);
+      router.replace({
+        pathname: '/',
+        params: { mode: 'signin', profileId },
+      });
+      return;
+    }
+    setLoading(true);
+    try {
+      await activateSavedProfile(profileId);
+      setSavedProfile(await loadActiveSavedProfile());
+      setProfiles(await listSavedProfiles());
+      setServers([]);
+      setQuery('');
+      setProfileMenuOpen(false);
+      setRefreshRequest(request => request + 1);
+    } catch (profileError) {
+      setError(messageFrom(profileError));
+      setLoading(false);
+    }
   }
 
   function refreshServers() {
@@ -169,17 +260,83 @@ export default function ServersScreen() {
       >
         <View style={styles.page}>
         <View style={styles.topline}>
-          <View style={styles.identity}>
+          <Pressable
+            accessibilityLabel="Switch Teleport profile"
+            accessibilityRole="button"
+            onPress={() => setProfileMenuOpen(open => !open)}
+            style={({ pressed }) => [styles.identity, pressed && styles.pressed]}
+          >
             <View style={styles.liveDot} />
-            <View>
-              <Text style={styles.cluster}>{profile?.clusterName ?? 'Cluster'}</Text>
-              <Text style={styles.user}>{profile?.username ?? 'operator'} / active identity</Text>
+            <View style={styles.identityCopy}>
+              <Text numberOfLines={1} style={styles.cluster}>
+                {savedProfile?.name ?? 'Cluster'}
+              </Text>
+              <Text numberOfLines={1} style={styles.user}>
+                {savedProfile?.profile.username ?? 'operator'}@{savedProfile?.profile.clusterName ?? 'cluster'}
+              </Text>
             </View>
-          </View>
-          <Pressable onPress={signOut} hitSlop={10}>
+            <Text style={styles.profileChevron}>{profileMenuOpen ? '⌃' : '⌄'}</Text>
+          </Pressable>
+          <Pressable
+            accessibilityLabel={`Sign out of ${savedProfile?.name ?? 'Teleport profile'}`}
+            accessibilityRole="button"
+            onPress={confirmSignOut}
+            hitSlop={10}
+          >
             <Text style={styles.signOut}>Sign out</Text>
           </Pressable>
         </View>
+
+        {profileMenuOpen ? (
+          <Panel style={styles.profileMenu}>
+            <Text style={styles.profileMenuCaption}>Teleport profiles</Text>
+            {profiles.map(profile => (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ selected: profile.id === savedProfile?.id }}
+                key={profile.id}
+                onPress={() => switchProfile(profile.id)}
+                style={({ pressed }) => [
+                  styles.profileChoice,
+                  profile.id === savedProfile?.id && styles.profileChoiceActive,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <View style={[
+                  styles.profileChoiceDot,
+                  profile.id === savedProfile?.id && styles.profileChoiceDotActive,
+                ]} />
+                <View style={styles.profileChoiceCopy}>
+                  <Text numberOfLines={1} style={styles.profileChoiceName}>{profile.name}</Text>
+                  <Text numberOfLines={1} style={styles.profileChoiceIdentity}>
+                    {profile.profile.username}@{profile.profile.proxyAddress}
+                    {!profile.sessionSnapshot ? ' · signed out' : ''}
+                  </Text>
+                </View>
+                <Text style={styles.profileShellCount}>
+                  {terminalWorkspace.tabs.filter(tab =>
+                    tab.profileId === profile.id && isActiveTerminalState(tab.state)
+                  ).length || ''}
+                </Text>
+              </Pressable>
+            ))}
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => router.push({ pathname: '/', params: { mode: 'add' } })}
+              style={({ pressed }) => [styles.addProfile, pressed && styles.pressed]}
+            >
+              <Text style={styles.addProfileMark}>＋</Text>
+              <Text style={styles.addProfileText}>Add Teleport profile</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => router.push('/profiles' as Href)}
+              style={({ pressed }) => [styles.manageProfiles, pressed && styles.pressed]}
+            >
+              <Text style={styles.manageProfilesText}>Manage saved profiles</Text>
+            </Pressable>
+          </Panel>
+        ) : null}
 
         <Text style={[
           styles.title,
@@ -190,8 +347,8 @@ export default function ServersScreen() {
           Choose the node for login
         </Text>
 
-        {profile?.proxyAddress === 'demo.telemob.invalid'
-          && profile.username === 'play-review' ? (
+        {savedProfile?.profile.proxyAddress === 'demo.telemob.invalid'
+          && savedProfile.profile.username === 'play-review' ? (
             <Notice>Offline store-review demo active. No external proxy is connected.</Notice>
           ) : null}
 
@@ -221,7 +378,9 @@ export default function ServersScreen() {
             >
               {filtered.map(server => (
                 <ServerCard
-                  activeLogin={activeTarget?.serverId === server.id ? activeTarget.login : undefined}
+                  activeLogins={activeTabs
+                    .filter(tab => tab.target.serverId === server.id)
+                    .map(tab => tab.target.login)}
                   compact={layout.compact}
                   key={server.id}
                   server={server}
@@ -237,28 +396,41 @@ export default function ServersScreen() {
         )}
         </View>
       </ScrollView>
+      <ThemedConfirmDialog
+        busy={signingOut}
+        confirmLabel="Sign out"
+        eyebrow="TELEPORT SESSION"
+        message={activeTabs.length
+          ? `This disconnects ${activeTabs.length} active terminal${activeTabs.length === 1 ? '' : 's'} and clears the saved login. Connection settings remain on this device.`
+          : 'This clears the saved login. Connection settings remain on this device for an easier sign-in next time.'}
+        onCancel={() => setSignOutDialogOpen(false)}
+        onConfirm={() => void signOutCurrentProfile()}
+        title={savedProfile ? `Sign out of ${savedProfile.name}?` : 'Sign out?'}
+        tone="accent"
+        visible={signOutDialogOpen && Boolean(savedProfile)}
+      />
     </SafeAreaView>
   );
 }
 
 function ServerCard({
-  activeLogin,
+  activeLogins,
   compact,
   server,
   width,
   onOpen,
 }: {
-  activeLogin?: string;
+  activeLogins: string[];
   compact: boolean;
   server: TeleportServer;
   width?: number;
-  onOpen: (server: TeleportServer, login: string) => void;
+  onOpen: (server: TeleportServer, login: string, forceNew?: boolean) => void;
 }) {
   return (
     <Panel style={[
       styles.serverCard,
       compact && styles.serverCardCompact,
-      activeLogin && styles.serverCardActive,
+      activeLogins.length > 0 && styles.serverCardActive,
       width ? { width } : styles.serverCardFull,
     ]}>
       <View style={styles.serverHeader}>
@@ -273,11 +445,13 @@ function ServerCard({
             <Text numberOfLines={2} style={styles.hostname}>{server.hostname}</Text>
             <View style={styles.hostMeta}>
               <Text numberOfLines={1} style={styles.address}>{server.address}</Text>
-              {activeLogin ? (
+              {activeLogins.length ? (
                 <View style={styles.activeBadge}>
                   <View style={styles.activeBadgeDot} />
                   <Text numberOfLines={1} style={styles.activeBadgeText}>
-                    {activeLogin} session active
+                    {activeLogins.length === 1
+                      ? `${activeLogins[0]} session active`
+                      : `${activeLogins.length} sessions active`}
                   </Text>
                 </View>
               ) : null}
@@ -298,23 +472,38 @@ function ServerCard({
       <View style={styles.loginRow}>
         <Text style={styles.loginCaption}>Login as</Text>
         <View style={styles.loginChoices}>
-          {(server.logins ?? []).map(login => (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityState={{ selected: activeLogin === login }}
-              key={login}
-              onPress={() => onOpen(server, login)}
-              style={({ pressed }) => [
-                styles.loginButton,
-                activeLogin === login && styles.loginButtonActive,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Text style={[styles.loginText, activeLogin === login && styles.loginTextActive]}>
-                {login}
-              </Text>
-            </Pressable>
-          ))}
+          {(server.logins ?? []).map(login => {
+            const activeCount = activeLogins.filter(active => active === login).length;
+            return (
+              <View key={login} style={styles.loginAction}>
+                <Pressable
+                  accessibilityLabel={activeCount ? `Open active ${login} session` : login}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: activeCount > 0 }}
+                  onPress={() => onOpen(server, login)}
+                  style={({ pressed }) => [
+                    styles.loginButton,
+                    activeCount > 0 && styles.loginButtonActive,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Text style={[styles.loginText, activeCount > 0 && styles.loginTextActive]}>
+                    {login}{activeCount > 1 ? ` · ${activeCount}` : ''}
+                  </Text>
+                </Pressable>
+                {activeCount ? (
+                  <Pressable
+                    accessibilityLabel={`Open another ${login} session on ${server.hostname}`}
+                    accessibilityRole="button"
+                    onPress={() => onOpen(server, login, true)}
+                    style={({ pressed }) => [styles.newShellButton, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.newShellText}>＋</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            );
+          })}
           {!server.logins?.length ? (
             <Text style={styles.noLogins}>No permitted SSH logins</Text>
           ) : null}
@@ -328,21 +517,10 @@ function messageFrom(error: unknown) {
   return error instanceof Error ? error.message : 'Could not load servers.';
 }
 
-function isMissingInMemorySession(error: unknown) {
-  return /authenticate before requesting Teleport resources/i.test(messageFrom(error));
-}
-
 function isRejectedSession(error: unknown) {
   return /\bHTTP 401\b|Teleport login has expired|saved (?:Teleport|development) login (?:has expired|is incomplete)|decode saved Teleport login/i.test(
     messageFrom(error)
   );
-}
-
-function isActiveTerminalState(state: TerminalConnectionState) {
-  return state === 'connecting'
-    || state === 'connected'
-    || state === 'checking'
-    || state === 'reconnecting';
 }
 
 const styles = StyleSheet.create({
@@ -352,11 +530,28 @@ const styles = StyleSheet.create({
   contentShort: { paddingVertical: space.md },
   page: { width: '100%', maxWidth: responsiveLayout.contentMaxWidth, gap: space.lg },
   topline: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  identity: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flex: 1 },
+  identity: { minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: space.sm, flex: 1 },
+  identityCopy: { minWidth: 0, flex: 1 },
   liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: palette.signal },
   cluster: { color: palette.porcelain, fontFamily: type.monoStrong, fontSize: 12 },
   user: { color: palette.quiet, fontFamily: type.mono, fontSize: 9, marginTop: 2 },
+  profileChevron: { color: palette.copper, fontFamily: type.monoStrong, fontSize: 13, paddingHorizontal: space.sm },
   signOut: { color: palette.copper, fontFamily: type.monoMedium, fontSize: 11 },
+  profileMenu: { gap: space.sm, padding: space.sm },
+  profileMenuCaption: { color: palette.quiet, fontFamily: type.monoMedium, fontSize: 8, letterSpacing: 1, textTransform: 'uppercase', paddingHorizontal: space.xs },
+  profileChoice: { minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: space.sm, borderColor: 'transparent', borderWidth: 1, borderRadius: radius.sm, paddingHorizontal: space.sm },
+  profileChoiceActive: { borderColor: palette.signal, backgroundColor: palette.raised },
+  profileChoiceDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: palette.quiet },
+  profileChoiceDotActive: { backgroundColor: palette.signal },
+  profileChoiceCopy: { flex: 1, minWidth: 0 },
+  profileChoiceName: { color: palette.porcelain, fontFamily: type.monoStrong, fontSize: 11 },
+  profileChoiceIdentity: { color: palette.quiet, fontFamily: type.mono, fontSize: 8, marginTop: 2 },
+  profileShellCount: { minWidth: 18, color: palette.signal, fontFamily: type.monoStrong, fontSize: 10, textAlign: 'center' },
+  addProfile: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: space.sm, borderTopColor: palette.rule, borderTopWidth: StyleSheet.hairlineWidth, paddingHorizontal: space.sm, paddingTop: space.sm },
+  addProfileMark: { color: palette.copper, fontFamily: type.monoStrong, fontSize: 18 },
+  addProfileText: { color: palette.copper, fontFamily: type.monoMedium, fontSize: 10 },
+  manageProfiles: { minHeight: 38, alignItems: 'center', justifyContent: 'center', borderTopColor: palette.rule, borderTopWidth: StyleSheet.hairlineWidth },
+  manageProfilesText: { color: palette.mist, fontFamily: type.monoMedium, fontSize: 9 },
   title: { color: palette.porcelain, fontFamily: type.display, fontSize: 34, lineHeight: 38, letterSpacing: -0.6 },
   titleCompact: { fontSize: 30, lineHeight: 34 },
   titleWide: { fontSize: 42, lineHeight: 46 },
@@ -388,6 +583,17 @@ const styles = StyleSheet.create({
   loginRow: { borderTopColor: palette.rule, borderTopWidth: 1, paddingTop: space.md, gap: space.sm },
   loginCaption: { color: palette.quiet, fontFamily: type.mono, fontSize: 9, textTransform: 'uppercase', letterSpacing: 0.8 },
   loginChoices: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
+  loginAction: { flexDirection: 'row', alignItems: 'stretch', gap: space.sm },
+  newShellButton: {
+    minWidth: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: palette.signal,
+    borderRadius: radius.sm,
+    backgroundColor: palette.raised,
+  },
+  newShellText: { color: palette.signal, fontFamily: type.monoMedium, fontSize: 13 },
   loginButton: { borderColor: palette.copperMuted, borderWidth: 1, borderRadius: radius.sm, paddingHorizontal: space.md, paddingVertical: space.sm },
   loginButtonActive: { borderColor: palette.signal, backgroundColor: palette.raised },
   loginText: { color: palette.copper, fontFamily: type.monoMedium, fontSize: 11 },

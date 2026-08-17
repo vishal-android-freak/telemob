@@ -385,34 +385,35 @@ private func callGo<Result>(_ operation: (NSErrorPointer) -> Result) throws -> R
 private final class BackgroundTerminalLease {
   static let shared = BackgroundTerminalLease()
   private var identifier: UIBackgroundTaskIdentifier = .invalid
-  private var activeSessionID: String?
+  private var activeSessionIDs = Set<String>()
 
   func start(sessionID: String) {
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
-      stopOnMainQueue()
-      activeSessionID = sessionID
-      identifier = UIApplication.shared.beginBackgroundTask(withName: "Telemob terminal") { [weak self] in
-        self?.stop(sessionID: sessionID)
+      activeSessionIDs.insert(sessionID)
+      guard identifier == .invalid else { return }
+      identifier = UIApplication.shared.beginBackgroundTask(withName: "Telemob terminals") { [weak self] in
+        self?.stopAll()
       }
     }
   }
 
   func stop(sessionID: String) {
     DispatchQueue.main.async { [weak self] in
-      guard let self, activeSessionID == sessionID else { return }
-      stopOnMainQueue()
+      guard let self else { return }
+      activeSessionIDs.remove(sessionID)
+      if activeSessionIDs.isEmpty { endTaskOnMainQueue() }
     }
   }
 
   func stopAll() {
     DispatchQueue.main.async { [weak self] in
-      self?.stopOnMainQueue()
+      self?.activeSessionIDs.removeAll()
+      self?.endTaskOnMainQueue()
     }
   }
 
-  private func stopOnMainQueue() {
-    activeSessionID = nil
+  private func endTaskOnMainQueue() {
     if identifier != .invalid {
       UIApplication.shared.endBackgroundTask(identifier)
       identifier = .invalid

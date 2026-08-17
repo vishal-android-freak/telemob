@@ -27,6 +27,24 @@ export type AuthenticatedProfile = {
   validUntil: string;
 };
 
+export type SavedTeleportProfile = {
+  id: string;
+  name: string;
+  profile: AuthenticatedProfile;
+  sessionSnapshot: string | null;
+  authMethod: AuthMethod;
+  insecure: boolean;
+  createdAt: string;
+  lastUsedAt: string;
+  signedOutAt?: string;
+};
+
+export type TeleportProfileStore = {
+  version: 2;
+  activeProfileId: string | null;
+  profiles: SavedTeleportProfile[];
+};
+
 export type TeleportServer = {
   id: string;
   hostname: string;
@@ -42,6 +60,8 @@ export type SessionTarget = {
   login: string;
   columns: number;
   rows: number;
+  tabId?: string;
+  profileId?: string;
 };
 
 export type SessionHandle = {

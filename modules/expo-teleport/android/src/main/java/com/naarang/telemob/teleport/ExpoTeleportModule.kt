@@ -197,7 +197,8 @@ class ExpoTeleportModule : Module() {
           TerminalForegroundService.start(
             context,
             session.getString("id"),
-            "${target.optString("login")}@${target.optString("hostname")}"
+            "${target.optString("login")}@${target.optString("hostname")}",
+            target.optString("tabId")
           )
         }
       }

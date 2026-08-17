@@ -66,9 +66,11 @@ The binding script also supplies 16 KB maximum and common page-size linker
 flags explicitly. EAS SDK 57 uses Android NDK r27b, which otherwise emits a
 4 KB-aligned `libgojni.so`; NDK r28 and newer use 16 KB alignment by default.
 
-Android terminal sessions use a foreground service. Test both notification
-permission outcomes, the notification Disconnect action, app background/resume,
-and the in-app Disconnect button after native changes.
+Android terminal sessions share a foreground service that tracks every open
+session. Test one and multiple terminal counts, notification deep links,
+Disconnect/Disconnect all, closing a single tab while another remains,
+notification permission outcomes, app background/resume, and the in-app
+Disconnect button after native changes.
 
 Android builds support portrait and landscape. Pixel 10 remains the primary
 physical-device target, while the x86 and x86_64 bindings also support Android

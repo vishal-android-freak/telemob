@@ -258,6 +258,37 @@ func TestRestoreSessionDoesNotDowngradeLiveCredentials(t *testing.T) {
 	}
 }
 
+func TestRestoreDifferentProfileKeepsOpenTerminals(t *testing.T) {
+	transport := newWebTransport(false)
+	terminal := &webTerminal{}
+	transport.terminals["session-one"] = terminal
+
+	now := time.Now()
+	snapshotJSON, err := marshal(persistedWebSession{
+		Version:        1,
+		ProxyAddress:   "https://second.example.test:443",
+		SessionCookie:  "second-cookie",
+		Token:          "second-token",
+		TokenExpiresAt: now.Add(10 * time.Minute),
+		ExpiresAt:      now.Add(12 * time.Hour),
+		Username:       "bob",
+		Cluster:        "second.example.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := transport.restoreSession(snapshotJSON); err != nil {
+		t.Fatalf("restoreSession() error = %v", err)
+	}
+	if transport.terminals["session-one"] != terminal {
+		t.Fatal("restoring another profile removed the existing terminal")
+	}
+	if transport.session == nil || transport.session.username != "bob" {
+		t.Fatal("the restored profile did not become the active authentication context")
+	}
+}
+
 func TestWebTransportTOTPListsNodesAndStreamsTerminal(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	mux := http.NewServeMux()

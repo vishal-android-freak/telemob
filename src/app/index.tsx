@@ -23,21 +23,27 @@ import { palette, radius, space, type } from '@/constants/tokens';
 import { getResponsiveLayout, responsiveLayout } from '@/lib/layout/responsive';
 import { getTeleportClient } from '@/lib/teleport/client';
 import {
-  clearProfile,
-  loadSessionSnapshot,
-  saveProfile,
-  saveSessionSnapshot,
+  activateSavedProfile,
+  forgetNativeProfile,
+  markNativeProfileActive,
+} from '@/lib/teleport/profile-session';
+import {
+  listSavedProfiles,
+  loadActiveSavedProfile,
+  markSavedProfileSignedOut,
+  saveAuthenticatedProfile,
 } from '@/lib/teleport/profile-store';
 import type {
   AuthChallenge,
   AuthenticatedProfile,
   AuthMethod,
+  SavedTeleportProfile,
   TeleportCapabilities,
 } from '@/types/teleport';
 
 export default function ConnectScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ reason?: string }>();
+  const params = useLocalSearchParams<{ reason?: string; mode?: string; profileId?: string }>();
   const { height, width } = useWindowDimensions();
   const layout = getResponsiveLayout(width, height);
   const [proxyAddress, setProxyAddress] = useState('');
@@ -50,12 +56,25 @@ export default function ConnectScreen() {
   const [error, setError] = useState(
     params.reason === 'session-expired'
       ? 'Your Teleport session expired. Sign in again to continue.'
-      : ''
+      : params.reason === 'signed-out'
+        ? 'Signed out. Your connection settings are ready when you want to sign in again.'
+        : ''
   );
   const [loading, setLoading] = useState(false);
-  const [restoring, setRestoring] = useState(true);
+  const [restoring, setRestoring] = useState(params.mode !== 'add');
+  const [savedProfiles, setSavedProfiles] = useState<SavedTeleportProfile[]>([]);
   const [capabilities, setCapabilities] =
     useState<TeleportCapabilities | null>(null);
+
+  function prefillSavedProfile(saved: SavedTeleportProfile) {
+    setProxyAddress(saved.profile.proxyAddress);
+    setUsername(saved.profile.username);
+    setMethod(saved.authMethod);
+    setInsecure(saved.insecure);
+    setPassword('');
+    setChallenge(null);
+    setTotp('');
+  }
 
   useEffect(() => {
     let mounted = true;
@@ -76,13 +95,31 @@ export default function ConnectScreen() {
     let mounted = true;
     async function restoreLogin() {
       try {
-        const snapshot = await loadSessionSnapshot();
-        if (!snapshot) return;
-        const profile = await getTeleportClient().restoreSession(snapshot);
-        await saveProfile(profile);
+        const profiles = await listSavedProfiles();
+        if (mounted) setSavedProfiles(profiles);
+        if (params.mode === 'add') return;
+        const saved = params.profileId
+          ? profiles.find(profile => profile.id === params.profileId) ?? null
+          : await loadActiveSavedProfile();
+        if (!saved) return;
+        if (params.mode === 'signin' || !saved.sessionSnapshot) {
+          if (mounted) prefillSavedProfile(saved);
+          return;
+        }
+        await activateSavedProfile(saved.id);
         if (mounted) router.replace('/servers');
-      } catch {
-        await clearProfile();
+      } catch (restoreError) {
+        if (isRejectedSession(restoreError)) {
+          const active = await loadActiveSavedProfile();
+          if (active) {
+            await markSavedProfileSignedOut(active.id);
+            forgetNativeProfile(active.id);
+            if (mounted) prefillSavedProfile({ ...active, sessionSnapshot: null });
+          }
+          const profiles = await listSavedProfiles();
+          if (mounted) setSavedProfiles(profiles);
+        }
+        if (mounted) setError(messageFrom(restoreError));
       } finally {
         if (mounted) setRestoring(false);
       }
@@ -91,12 +128,50 @@ export default function ConnectScreen() {
     return () => {
       mounted = false;
     };
-  }, [router]);
+  }, [params.mode, params.profileId, router]);
 
   async function persistLogin(profile: AuthenticatedProfile) {
     const snapshot = await getTeleportClient().exportSession();
-    await saveProfile(profile);
-    await saveSessionSnapshot(snapshot);
+    const saved = await saveAuthenticatedProfile(profile, snapshot, {
+      authMethod: method,
+      insecure,
+    });
+    markNativeProfileActive(saved.id);
+  }
+
+  async function continueSavedProfile(saved: SavedTeleportProfile) {
+    setError('');
+    if (!saved.sessionSnapshot) {
+      prefillSavedProfile(saved);
+      return;
+    }
+    setLoading(true);
+    try {
+      await activateSavedProfile(saved.id);
+      openServers();
+    } catch (restoreError) {
+      if (isRejectedSession(restoreError)) {
+        await markSavedProfileSignedOut(saved.id);
+        forgetNativeProfile(saved.id);
+        const profiles = await listSavedProfiles();
+        setSavedProfiles(profiles);
+        prefillSavedProfile(profiles.find(profile => profile.id === saved.id) ?? {
+          ...saved,
+          sessionSnapshot: null,
+        });
+      }
+      setError(messageFrom(restoreError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function openServers() {
+    if (params.mode === 'add' && router.canDismiss()) {
+      router.dismissTo('/servers');
+    } else {
+      router.replace('/servers');
+    }
   }
 
   async function beginLogin() {
@@ -128,7 +203,7 @@ export default function ConnectScreen() {
     try {
       const profile = await getTeleportClient().finishPasskey(next.challengeId);
       await persistLogin(profile);
-      router.replace('/servers');
+      openServers();
     } catch (loginError) {
       setError(messageFrom(loginError));
     } finally {
@@ -146,7 +221,7 @@ export default function ConnectScreen() {
         totp
       );
       await persistLogin(profile);
-      router.replace('/servers');
+      openServers();
     } catch (loginError) {
       setError(messageFrom(loginError));
     } finally {
@@ -211,6 +286,49 @@ export default function ConnectScreen() {
               layout.split && styles.formColumnSplit,
             ]}>
               <View style={[styles.form, layout.shortViewport && styles.formShort]}>
+                {savedProfiles.length ? (
+                  <View style={styles.savedSection}>
+                    <FieldLabel>Saved profiles</FieldLabel>
+                    <ScrollView
+                      contentContainerStyle={styles.savedRail}
+                      horizontal
+                      keyboardShouldPersistTaps="handled"
+                      showsHorizontalScrollIndicator={false}
+                    >
+                      {savedProfiles.map(saved => (
+                        <Pressable
+                          accessibilityLabel={saved.sessionSnapshot
+                            ? `Continue as ${saved.name}`
+                            : `Sign in to ${saved.name}`}
+                          accessibilityRole="button"
+                          key={saved.id}
+                          onPress={() => continueSavedProfile(saved)}
+                          style={({ pressed }) => [
+                            styles.savedProfile,
+                            pressed && styles.methodPressed,
+                          ]}
+                        >
+                          <View style={styles.savedProfileTopline}>
+                            <View style={[
+                              styles.savedProfileDot,
+                              !saved.sessionSnapshot && styles.savedProfileDotSignedOut,
+                            ]} />
+                            <Text numberOfLines={1} style={styles.savedProfileName}>
+                              {saved.name}
+                            </Text>
+                          </View>
+                          <Text numberOfLines={1} style={styles.savedProfileIdentity}>
+                            {saved.profile.username}@{saved.profile.proxyAddress}
+                          </Text>
+                          {!saved.sessionSnapshot ? (
+                            <Text style={styles.savedProfileStatus}>SIGNED OUT · TAP TO SIGN IN</Text>
+                          ) : null}
+                        </Pressable>
+                      ))}
+                    </ScrollView>
+                    <Text style={styles.savedHint}>Choose a saved identity or sign in with the details below.</Text>
+                  </View>
+                ) : null}
                 <View>
                   <FieldLabel>Teleport gateway</FieldLabel>
                   <Field
@@ -372,6 +490,12 @@ function messageFrom(error: unknown) {
   return error instanceof Error ? error.message : 'Authentication could not continue.';
 }
 
+function isRejectedSession(error: unknown) {
+  return /\bHTTP 401\b|Teleport login has expired|saved (?:Teleport|development) login (?:has expired|is incomplete)|decode saved Teleport login/i.test(
+    messageFrom(error)
+  );
+}
+
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   safeArea: { flex: 1, backgroundColor: palette.ink },
@@ -415,6 +539,24 @@ const styles = StyleSheet.create({
   subtitleShort: { fontSize: 15, lineHeight: 20 },
   form: { gap: space.lg },
   formShort: { gap: space.md },
+  savedSection: { gap: space.sm },
+  savedRail: { gap: space.sm, paddingRight: space.sm },
+  savedProfile: {
+    width: 220,
+    gap: space.xs,
+    borderColor: palette.rule,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    backgroundColor: palette.panel,
+    padding: space.md,
+  },
+  savedProfileTopline: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  savedProfileDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: palette.signal },
+  savedProfileDotSignedOut: { backgroundColor: palette.quiet },
+  savedProfileName: { flex: 1, color: palette.porcelain, fontFamily: type.monoStrong, fontSize: 12 },
+  savedProfileIdentity: { color: palette.quiet, fontFamily: type.mono, fontSize: 9 },
+  savedProfileStatus: { color: palette.copper, fontFamily: type.monoMedium, fontSize: 7, letterSpacing: 0.7 },
+  savedHint: { color: palette.quiet, fontFamily: type.mono, fontSize: 9 },
   methodRow: { flexDirection: 'row', gap: space.sm },
   method: {
     flex: 1,

@@ -16,10 +16,12 @@ publisher before installing it.
 - Node metadata and terminal bytes authorized by that proxy.
 - Clipboard text only after the user invokes paste.
 
-The password is not persisted. Telemob serializes the authenticated web session
-into platform SecureStore so it can restore an unexpired login after a cold
-launch. Signing out, an expired/rejected session, or an authorization failure
-clears the saved profile.
+Passwords and TOTP codes are not persisted. Telemob can save multiple Teleport
+profiles. Each profile contains display metadata plus its own authenticated web
+session snapshot under a separate platform SecureStore key, allowing an
+unexpired login to be restored after a cold launch or profile switch. Forgetting
+a profile or a confirmed expired/rejected session removes that profile only;
+transient connectivity failures do not erase saved authentication.
 
 ## Network destinations
 
