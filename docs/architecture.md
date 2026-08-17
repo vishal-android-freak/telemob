@@ -57,9 +57,10 @@ committed to the repository.
 6. Authentication-dependent native calls are serialized while profiles switch,
    because the Go core has one current web-session context. Already-open SSH
    WebSockets remain independent and continue running during that switch.
-7. A confirmed authorization failure while loading resources removes only the
-   rejected saved profile. DNS, TLS, and other transient failures retain it and
-   expose Retry and pull-to-refresh recovery.
+7. A confirmed authorization failure while loading resources clears only the
+   rejected profile's session snapshot while retaining its connection settings.
+   DNS, TLS, and other transient failures retain authentication and expose Retry
+   and pull-to-refresh recovery.
 
 Browser MFA avoids requiring Associated Domains or Digital Asset Links for
 proxy hostnames entered by users. It requires Teleport 18.8 or newer and a
@@ -80,6 +81,12 @@ Teleport proxy:
 Authorization, RBAC filtering, SSH certificates, session recording, and audit
 behavior remain under the Teleport proxy's control. Telemob does not bypass the
 proxy or connect directly to SSH port 22.
+
+Successful SSH connections update a bounded, per-profile node-preference index
+in SecureStore. It contains favorites, the 50 most recent node timestamps, the
+last successful login selected for each node, and the profile's node-list query,
+filter, and sort settings. Failed connection attempts are not recorded as
+recents, and forgetting a profile removes its node-preference entry.
 
 The Go module does not import Teleport's internal `lib/client` package. It keeps
 the mobile binary smaller by implementing the required web and WebSocket

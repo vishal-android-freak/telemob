@@ -301,6 +301,7 @@ function normalizeServer(value: unknown, index: number): TeleportServer {
         ? server.hostname
         : 'Unnamed node',
     address: typeof server.address === 'string' ? server.address : 'tunnel',
+    clusterName: typeof server.clusterName === 'string' ? server.clusterName : undefined,
     labels:
       server.labels && typeof server.labels === 'object' ? server.labels : {},
     logins: Array.isArray(server.logins)

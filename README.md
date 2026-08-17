@@ -31,7 +31,8 @@ before relying on it for critical access.
   never persisted.
 - Multiple saved Teleport profiles with independent encrypted session snapshots,
   profile naming, switching, and removal.
-- RBAC-filtered node discovery, search, and SSH-login selection.
+- RBAC-filtered node discovery with per-profile favorites, recents, preferred
+  SSH logins, remembered filters, and multiple sort modes.
 - Interactive PTY sessions over Teleport's authenticated WebSocket transport.
 - Multiple concurrent terminal tabs with independent connection state, parser
   state, scrollback, dimensions, and unread activity.

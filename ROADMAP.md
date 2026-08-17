@@ -20,24 +20,12 @@ changes, and contributor interest.
   deletion, per-profile TLS/auth preferences, and no persisted passwords or
   TOTP codes.
 
-### Per-session MFA
-
-Support the additional WebAuthn or identity-provider verification that a
-Teleport role can require when opening an SSH connection. The implementation
-should reuse Telemob's existing browser-MFA callback flow where possible.
-
-This closes the most important current compatibility gap because nodes protected
-by `require_session_mfa` cannot otherwise be reached from Telemob.
-
-- [Teleport per-session MFA](https://goteleport.com/docs/zero-trust-access/authentication/per-session-mfa/)
-- [Teleport role reference](https://goteleport.com/docs/reference/access-controls/roles/)
-
 ### Favorites, recents, and node organization
 
-- Favorite frequently used nodes.
-- Show recently connected nodes and preferred SSH logins.
-- Sort and filter by hostname, label, cluster, status, or last connection time.
-- Remember useful filters independently for each Teleport profile.
+- [x] Favorite frequently used nodes.
+- [x] Show recently connected nodes and preferred SSH logins.
+- [x] Sort and filter by hostname, label, cluster, status, or last connection time.
+- [x] Remember useful filters independently for each Teleport profile.
 
 ### Connection recovery and session lifetime UX
 
@@ -121,6 +109,18 @@ phone without granting permanent elevated privileges.
 
 ## Later — deeper Teleport integration
 
+### Per-session MFA
+
+Support the additional WebAuthn or identity-provider verification that a
+Teleport role can require when opening an SSH connection. The implementation
+should reuse Telemob's existing browser-MFA callback flow where possible.
+
+Nodes protected by `require_session_mfa` cannot be reached from Telemob until
+this work is implemented.
+
+- [Teleport per-session MFA](https://goteleport.com/docs/zero-trust-access/authentication/per-session-mfa/)
+- [Teleport role reference](https://goteleport.com/docs/reference/access-controls/roles/)
+
 ### Trusted and leaf clusters
 
 - Discover root and leaf clusters available to the authenticated identity.
@@ -172,12 +172,10 @@ core SSH reliability.
 
 ## Suggested implementation order
 
-1. Per-session MFA.
-2. Favorites and recents.
-3. Connection recovery and session-expiry UX.
-4. Browser-based SSO.
-5. Access Requests.
-6. SFTP file transfer.
-7. Keyboard customization and terminal appearance.
-8. Biometric lock and private CA management.
-9. Trusted clusters, shared sessions, and recordings.
+1. Connection recovery and session-expiry UX.
+2. Browser-based SSO.
+3. Access Requests.
+4. SFTP file transfer.
+5. Keyboard customization and terminal appearance.
+6. Biometric lock and private CA management.
+7. Trusted clusters, shared sessions, recordings, and per-session MFA.

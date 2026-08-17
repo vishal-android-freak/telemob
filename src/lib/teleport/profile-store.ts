@@ -1,6 +1,10 @@
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
+import {
+  clearAllNodePreferences,
+  removeProfileNodePreferences,
+} from '@/lib/teleport/node-preferences';
 import type {
   AuthMethod,
   AuthenticatedProfile,
@@ -181,6 +185,9 @@ export function removeSavedProfile(profileId: string) {
       profiles,
     };
     return [updated, updated] as const;
+  }).then(async store => {
+    await removeProfileNodePreferences(profileId);
+    return store;
   });
 }
 
@@ -191,6 +198,7 @@ export function clearAllProfiles() {
       removeValue(storeKey),
       removeValue(legacyProfileKey),
       removeValue(legacySessionKey),
+      clearAllNodePreferences(store.profiles.map(profile => profile.id)),
       ...store.profiles.map(profile => removeValue(profileSessionKey(profile.id))),
     ]);
   });

@@ -49,6 +49,7 @@ export type TeleportServer = {
   id: string;
   hostname: string;
   address: string;
+  clusterName?: string;
   labels: Record<string, string>;
   logins: string[];
   status: 'online' | 'unknown';

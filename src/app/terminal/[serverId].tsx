@@ -676,7 +676,7 @@ function TerminalScreen({
                     accessibilityLabel={`Disconnect ${tab.target.login} at ${tab.target.hostname}`}
                     accessibilityRole="button"
                     disabled={disconnectingTabId === tab.tabId}
-                    hitSlop={4}
+                    hitSlop={6}
                     onPress={() => requestDisconnectTerminal(tab.tabId)}
                     style={({ pressed }) => [
                       styles.closeTabButton,
@@ -691,6 +691,7 @@ function TerminalScreen({
               <Pressable
                 accessibilityLabel="Open another terminal"
                 accessibilityRole="button"
+                hitSlop={6}
                 onPress={() => router.back()}
                 style={({ pressed }) => [
                   styles.newTabButton,
@@ -986,7 +987,7 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: palette.terminal },
   shell: { flex: 1, backgroundColor: palette.terminal },
   tabBar: {
-    height: 44,
+    height: 36,
     flexDirection: 'row',
     alignItems: 'center',
     borderBottomColor: palette.rule,
@@ -994,7 +995,7 @@ const styles = StyleSheet.create({
     backgroundColor: palette.deep,
   },
   backButton: {
-    width: 42,
+    width: 36,
     flexShrink: 0,
     zIndex: 2,
     alignSelf: 'stretch',
@@ -1004,7 +1005,7 @@ const styles = StyleSheet.create({
     borderRightWidth: StyleSheet.hairlineWidth,
     backgroundColor: palette.deep,
   },
-  back: { color: palette.copper, fontFamily: type.monoMedium, fontSize: 28, lineHeight: 30 },
+  back: { color: palette.copper, fontFamily: type.monoMedium, fontSize: 23, lineHeight: 25 },
   tabScroller: {
     flex: 1,
     minWidth: 0,
@@ -1014,19 +1015,19 @@ const styles = StyleSheet.create({
   tabRail: {
     flexGrow: 1,
     alignItems: 'stretch',
-    gap: 3,
+    gap: 2,
     backgroundColor: palette.deep,
-    paddingRight: 3,
+    paddingRight: 2,
   },
   terminalTab: {
-    minWidth: 142,
-    maxWidth: 200,
+    minWidth: 118,
+    maxWidth: 172,
     alignSelf: 'stretch',
     flexDirection: 'row',
     alignItems: 'center',
     flexShrink: 0,
     borderBottomColor: 'transparent',
-    borderBottomWidth: 2,
+    borderBottomWidth: 1.5,
     backgroundColor: palette.panel,
   },
   terminalTabActive: { borderBottomColor: palette.copper, backgroundColor: palette.raised },
@@ -1037,33 +1038,29 @@ const styles = StyleSheet.create({
     alignSelf: 'stretch',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 7,
-    paddingLeft: space.sm,
+    gap: 5,
+    paddingLeft: 7,
   },
-  terminalTabDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: palette.signal },
+  terminalTabDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: palette.signal },
   terminalTabDotWaiting: { backgroundColor: palette.warning },
   terminalTabDotUnread: { backgroundColor: palette.copper },
-  terminalTabText: { flex: 1, minWidth: 0, color: palette.mist, fontFamily: type.mono, fontSize: 8 },
+  terminalTabText: { flex: 1, minWidth: 0, color: palette.mist, fontFamily: type.mono, fontSize: 7 },
   terminalTabTextActive: { color: palette.porcelain, fontFamily: type.monoMedium },
   closeTabButton: {
-    width: 34,
+    width: 28,
     alignSelf: 'stretch',
     alignItems: 'center',
     justifyContent: 'center',
-    borderLeftColor: palette.rule,
-    borderLeftWidth: StyleSheet.hairlineWidth,
   },
   closeTabButtonDisabled: { opacity: 0.45 },
   closeTabButtonPressed: { backgroundColor: palette.deep },
-  closeTabText: { color: palette.danger, fontFamily: type.monoMedium, fontSize: 17, lineHeight: 19 },
+  closeTabText: { color: palette.danger, fontFamily: type.monoMedium, fontSize: 14, lineHeight: 16 },
   newTabButton: {
-    width: 42,
+    width: 32,
     alignItems: 'center',
     justifyContent: 'center',
-    borderColor: palette.rule,
-    borderWidth: StyleSheet.hairlineWidth,
   },
-  newTabText: { color: palette.copper, fontFamily: type.monoStrong, fontSize: 17 },
+  newTabText: { color: palette.copper, fontFamily: type.monoStrong, fontSize: 14 },
   terminalViewport: { flex: 1, overflow: 'hidden', backgroundColor: palette.terminal },
   nativeTerminal: { flex: 1 },
   directInput: { position: 'absolute', width: 1, height: 1, left: 0, bottom: 0, opacity: 0 },

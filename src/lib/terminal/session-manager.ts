@@ -1,6 +1,7 @@
 import { AppState, Platform, type AppStateStatus } from 'react-native';
 
 import { getTeleportClient, type TeleportClient } from '@/lib/teleport/client';
+import { recordNodeConnection } from '@/lib/teleport/node-preferences';
 import {
   refreshSavedProfile,
   withSavedProfile,
@@ -324,6 +325,11 @@ export class TerminalSessionController {
       this.state = 'connected';
       this.error = '';
       this.publish();
+      void recordNodeConnection(this.profileId, {
+        serverId: this.target.serverId,
+        hostname: this.target.hostname,
+        login: this.target.login,
+      }).catch(() => undefined);
       if (this.workspace.isActive(this.tabId)) this.focus(true);
     } catch (error) {
       if (attempt !== this.connectionAttempt) return;

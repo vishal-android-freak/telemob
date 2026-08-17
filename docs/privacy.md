@@ -14,14 +14,18 @@ publisher before installing it.
 - TOTP codes or Browser MFA results used to complete authentication.
 - Teleport web-session cookies and tokens returned by the selected proxy.
 - Node metadata and terminal bytes authorized by that proxy.
+- Per-profile node favorites, recent connection timestamps, preferred SSH
+  logins, and saved node-list filters.
 - Clipboard text only after the user invokes paste.
 
 Passwords and TOTP codes are not persisted. Telemob can save multiple Teleport
 profiles. Each profile contains display metadata plus its own authenticated web
 session snapshot under a separate platform SecureStore key, allowing an
 unexpired login to be restored after a cold launch or profile switch. Forgetting
-a profile or a confirmed expired/rejected session removes that profile only;
-transient connectivity failures do not erase saved authentication.
+a profile removes its saved session and node preferences. Signing out or a
+confirmed expired/rejected session clears authentication while retaining the
+profile's connection settings for reauthentication. Transient connectivity
+failures do not erase saved authentication.
 
 ## Network destinations
 
