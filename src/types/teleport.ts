@@ -74,7 +74,43 @@ export type TeleportCapabilities = {
   nativeCoreLinked: boolean;
   passkey: boolean;
   totp: boolean;
+  localPortForwarding: boolean;
   developmentDriver: boolean;
+};
+
+export type ForwardAuthorizationRequest = {
+  password: string;
+  method: AuthMethod;
+  profileId: string;
+};
+
+export type ForwardAuthorizationStatus = {
+  authorized: boolean;
+  validUntil?: string;
+  username?: string;
+  clusterName?: string;
+};
+
+export type LocalForwardRequest = {
+  name: string;
+  profileId: string;
+  serverId: string;
+  hostname: string;
+  login: string;
+  clusterName?: string;
+  remoteHost: string;
+  remotePort: number;
+  localPort: number;
+};
+
+export type LocalForward = LocalForwardRequest & {
+  id: string;
+  clusterName: string;
+  localHost: '127.0.0.1';
+  state: 'connecting' | 'listening' | 'stopped' | 'error';
+  activeConnections: number;
+  startedAt: string;
+  error?: string;
 };
 
 export type TerminalEvent =
@@ -96,7 +132,12 @@ export type TerminalEvent =
       bellCount?: number;
     }
   | { type: 'closed'; sessionId: string; reason?: string }
-  | { type: 'error'; sessionId: string; message: string };
+  | { type: 'error'; sessionId: string; message: string }
+  | {
+      type: 'forward';
+      forward: LocalForward;
+      reason?: string;
+    };
 
 export type TerminalOutputSnapshot = {
   sessionId: string;

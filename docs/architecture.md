@@ -16,7 +16,7 @@ Expo native module (Swift or Kotlin)
         ├──► libghostty-vt + native terminal view
         │
         └──► generated gomobile bindings ──► Shared Go core
-        │ HTTPS + authenticated binary WebSocket
+        │ HTTPS + authenticated binary WebSocket / SSH
         ▼
 Teleport proxy ──► SSH node
 ```
@@ -26,6 +26,8 @@ Teleport proxy ──► SSH node
 - `src/app` owns routing and mobile screens.
 - `src/lib/teleport` owns the TypeScript client boundary, secure profile
   restoration, and the deterministic web preview.
+- `src/lib/network` owns connectivity observation, connection-error taxonomy,
+  bounded retry timing, and recovery from network-path changes.
 - `src/lib/terminal` owns input sequences, viewport/session coordination,
   reconnect behavior, and React subscriptions. It does not parse or paint the
   terminal screen.
@@ -64,6 +66,17 @@ committed to the repository.
    rejected profile's session snapshot while retaining its connection settings.
    DNS, TLS, and other transient failures retain authentication and expose Retry
    and pull-to-refresh recovery.
+8. Local forwarding has a separate step-up flow that asks Teleport for a
+   temporary SSH user certificate. Telemob generates the SSH key on-device,
+   stores the key and certificate only inside the encrypted profile snapshot,
+   and never persists the password, TOTP value, or passkey assertion.
+
+Resource discovery and terminal connection attempts share one connectivity
+observer. It tracks Wi-Fi, cellular, Ethernet, VPN, and IP changes without
+requiring public-internet validation, because a private Teleport proxy can be
+reachable on a local network that Android or iOS considers internet-less.
+Transient failures use bounded exponential backoff and wake immediately when a
+new network path appears. Offline waiting does not consume a retry attempt.
 
 Browser MFA avoids requiring Associated Domains or Digital Asset Links for
 proxy hostnames entered by users. It requires Teleport 18.8 or newer and a
@@ -95,6 +108,28 @@ The Go module does not import Teleport's internal `lib/client` package. It keeps
 the mobile binary smaller by implementing the required web and WebSocket
 boundary with `gorilla/websocket`. Teleport's own code and documentation remain
 under their respective licenses.
+
+## Local TCP forwarding
+
+Each forward binds a TCP listener to `127.0.0.1` only; port `0` asks the
+operating system to choose an available port. The Go core authenticates to the
+Teleport SSH proxy with the temporary certificate, opens the selected node via
+Teleport's proxy subsystem, then creates one standard SSH `direct-tcpip`
+channel per local client connection. Teleport and the target node remain the
+authority for role restrictions, destination access, audit behavior, and
+certificate expiry.
+
+Multiple listeners and multiple client connections can run concurrently.
+Listener definitions may be saved per profile, but saved definitions do not
+contain credentials and do not start automatically. An explicit Stop closes the
+listener and every connection using it. A lost SSH transport closes the affected
+forward and leaves its saved definition available for a deliberate restart.
+
+Android registers active forwards with the same user-visible foreground service
+as terminal sessions. iOS uses the same finite background-task lease as terminal
+sessions, so forwarding is foreground-reliable but only best-effort after the
+app is suspended. Neither platform exposes a listener on Wi-Fi, Ethernet, VPN,
+or cellular interfaces.
 
 ## Terminal rendering and input
 
@@ -137,6 +172,13 @@ React. On resume, every live controller fetches missed frames and pings its
 WebSocket. A failed check creates a new SSH session and a fresh native terminal
 so old output is not appended to a replacement shell.
 
+An unexpected terminal transport failure enters a bounded reconnect loop. A
+network change wakes that loop immediately; a final transient failure leaves a
+themed Retry action in the terminal instead of closing its tab. Expected remote
+shell exits still close normally. Explicit Teleport 401 or 403 responses stop
+retrying and expose a controlled Sign in action, while DNS, timeout, TLS, and
+proxy reachability failures never clear saved authentication.
+
 Closing a shell removes only that terminal tab and activates a neighboring tab,
 or pops to the existing node list when none remain. Closing SSH does not log out
 of Teleport. Forgetting a profile disconnects only that profile's terminals;
@@ -176,7 +218,7 @@ of truth for expiration and authorization.
 
 - SSO and identity-provider login.
 - Application, database, Kubernetes, and desktop resources.
-- File transfer, agent forwarding, port forwarding, and session joining.
+- File transfer, agent forwarding, remote/dynamic forwarding, and session joining.
 - Per-session MFA and native platform passkey association.
 - Indefinite iOS background execution.
 

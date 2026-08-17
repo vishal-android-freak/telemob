@@ -119,9 +119,89 @@ func (c *Core) SetEventSink(sink EventSink) {
 
 func (c *Core) CapabilitiesJSON() string {
 	if c.usesDevelopmentTransport() {
-		return `{"nativeCoreLinked":true,"passkey":true,"totp":true,"developmentDriver":true}`
+		return `{"nativeCoreLinked":true,"passkey":true,"totp":true,"localPortForwarding":true,"developmentDriver":true}`
 	}
-	return `{"nativeCoreLinked":true,"passkey":true,"totp":true,"developmentDriver":false}`
+	return `{"nativeCoreLinked":true,"passkey":true,"totp":true,"localPortForwarding":true,"developmentDriver":false}`
+}
+
+// BeginForwardAuthorizationJSON starts a separate Teleport SSH certificate
+// ceremony. Web terminal cookies cannot be reused for direct-tcpip channels.
+func (c *Core) BeginForwardAuthorizationJSON(requestJSON string) (string, error) {
+	if c.usesDevelopmentTransport() {
+		var request forwardAuthorizationRequest
+		if err := json.Unmarshal([]byte(requestJSON), &request); err != nil {
+			return "", fmt.Errorf("decode port forwarding authorization: %w", err)
+		}
+		if request.Method == "totp" {
+			id, err := randomID("forward-auth")
+			if err != nil {
+				return "", err
+			}
+			c.mu.Lock()
+			c.challenges[id] = loginRequest{Method: "totp"}
+			c.mu.Unlock()
+			return marshal(map[string]any{"kind": "totp", "challengeId": id, "digits": 6})
+		}
+		return "", errors.New("the development forwarder currently uses TOTP authorization")
+	}
+	return c.web.beginForwardAuthorization(requestJSON)
+}
+
+func (c *Core) FinishForwardTOTP(challengeID, code string) (string, error) {
+	if c.usesDevelopmentTransport() {
+		if len(code) != 6 {
+			return "", errors.New("enter the six-digit authenticator code")
+		}
+		c.mu.Lock()
+		request, ok := c.challenges[challengeID]
+		delete(c.challenges, challengeID)
+		c.mu.Unlock()
+		if !ok || request.Method != "totp" {
+			return "", errors.New("the port forwarding authorization challenge is missing or expired")
+		}
+		return marshal(map[string]any{"authorized": true, "validUntil": time.Now().Add(forwardingCertificateTTL).UTC().Format(time.RFC3339)})
+	}
+	return c.web.finishForwardTOTP(challengeID, code)
+}
+
+func (c *Core) FinishForwardPasskey(challengeID, credentialJSON string) (string, error) {
+	if c.usesDevelopmentTransport() {
+		return "", errors.New("the development forwarder currently uses TOTP authorization")
+	}
+	return c.web.finishForwardPasskey(challengeID, credentialJSON)
+}
+
+func (c *Core) ForwardAuthorizationStatusJSON() (string, error) {
+	if c.usesDevelopmentTransport() {
+		return marshal(map[string]any{"authorized": true, "validUntil": time.Now().Add(forwardingCertificateTTL).UTC().Format(time.RFC3339)})
+	}
+	return c.web.forwardAuthorizationStatus()
+}
+
+func (c *Core) StartLocalForwardJSON(requestJSON string) (string, error) {
+	if c.usesDevelopmentTransport() {
+		return "", errors.New("local port forwarding requires the native Teleport transport")
+	}
+	return c.web.startLocalForward(requestJSON)
+}
+
+func (c *Core) ListLocalForwardsJSON() (string, error) {
+	if c.usesDevelopmentTransport() {
+		return "[]", nil
+	}
+	return c.web.listLocalForwards()
+}
+
+func (c *Core) StopLocalForward(id string) {
+	if !c.usesDevelopmentTransport() {
+		c.web.stopLocalForward(id)
+	}
+}
+
+func (c *Core) StopAllLocalForwards() {
+	if !c.usesDevelopmentTransport() {
+		c.web.stopAllLocalForwards()
+	}
 }
 
 func (c *Core) ExportSessionJSON() (string, error) {

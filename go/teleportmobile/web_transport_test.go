@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/ssh"
 )
 
 func TestTerminalEnvelopeRoundTrip(t *testing.T) {
@@ -594,6 +596,169 @@ func TestWebTransportBrowserMFARequiresSupportedProxy(t *testing.T) {
 	}
 	if len(transport.pending) != 0 {
 		t.Fatalf("unsupported Browser MFA left %d pending login(s)", len(transport.pending))
+	}
+}
+
+func TestForwardAuthorizationIssuesAndPersistsSSHIdentity(t *testing.T) {
+	caSigner := testSSHSigner(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/webapi/ping", func(response http.ResponseWriter, request *http.Request) {
+		writeTestJSON(t, response, map[string]any{
+			"cluster_name": "root",
+			"fips":         false,
+			"proxy": map[string]any{
+				"tls_routing_enabled": false,
+				"ssh":                 map[string]any{"ssh_public_addr": "proxy.example.test:3023"},
+			},
+		})
+	})
+	mux.HandleFunc("/v1/webapi/mfa/login/begin", func(response http.ResponseWriter, request *http.Request) {
+		var body map[string]string
+		readTestJSON(t, request, &body)
+		if body["user"] != "alice" || body["pass"] != "forward-secret" {
+			t.Errorf("unexpected forwarding begin request: %#v", body)
+		}
+		if body["browser_mfa_tsh_redirect_url"] != "" {
+			writeTestJSON(t, response, map[string]any{
+				"browser_challenge": map[string]any{"requestId": "forward-browser-request"},
+			})
+			return
+		}
+		writeTestJSON(t, response, map[string]any{"totp_challenge": true})
+	})
+	mux.HandleFunc("/v1/webapi/mfa/login/finish", func(response http.ResponseWriter, request *http.Request) {
+		var body struct {
+			User      string         `json:"user"`
+			Password  string         `json:"password"`
+			PublicKey []byte         `json:"pub_key"`
+			TTL       int64          `json:"ttl"`
+			Cluster   string         `json:"RouteToCluster"`
+			TOTP      string         `json:"totp_code"`
+			WebAuthn  map[string]any `json:"webauthn_challenge_response"`
+		}
+		readTestJSON(t, request, &body)
+		if body.User != "alice" || body.Password != "forward-secret" || body.Cluster != "root" {
+			t.Errorf("unexpected forwarding finish identity: %#v", body)
+		}
+		if body.TTL != int64(forwardingCertificateTTL) {
+			t.Errorf("forwarding certificate TTL = %d, want %d", body.TTL, int64(forwardingCertificateTTL))
+		}
+		if body.TOTP != "123456" && body.WebAuthn == nil {
+			t.Errorf("forwarding finish omitted second factor: %#v", body)
+		}
+		if body.WebAuthn != nil {
+			if body.WebAuthn["extensions"] == nil || body.WebAuthn["clientExtensionResults"] != nil {
+				t.Errorf("unexpected Browser MFA assertion shape: %#v", body.WebAuthn)
+			}
+		}
+		publicKey, _, _, _, err := ssh.ParseAuthorizedKey(body.PublicKey)
+		if err != nil {
+			t.Errorf("parse generated SSH public key: %v", err)
+			http.Error(response, err.Error(), http.StatusBadRequest)
+			return
+		}
+		now := uint64(time.Now().Unix())
+		certificate := &ssh.Certificate{
+			Key: publicKey, CertType: ssh.UserCert, KeyId: "alice",
+			ValidPrincipals: []string{"ubuntu"}, ValidAfter: now - 1, ValidBefore: now + 300,
+			Permissions: ssh.Permissions{Extensions: map[string]string{"permit-port-forwarding": ""}},
+		}
+		if err := certificate.SignCert(rand.Reader, caSigner); err != nil {
+			t.Errorf("sign generated SSH certificate: %v", err)
+			http.Error(response, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeTestJSON(t, response, map[string]any{
+			"cert": ssh.MarshalAuthorizedKey(certificate),
+			"host_signers": []map[string]any{{
+				"domain_name":   "root",
+				"checking_keys": [][]byte{ssh.MarshalAuthorizedKey(caSigner.PublicKey())},
+			}},
+		})
+	})
+	server := httptest.NewTLSServer(mux)
+	defer server.Close()
+	baseURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := server.Client()
+	client.Jar, err = cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Jar.SetCookies(baseURL, []*http.Cookie{{
+		Name: sessionCookieName, Value: "forward-session", Path: "/", Secure: true,
+	}})
+
+	for _, test := range []struct {
+		name   string
+		method string
+	}{
+		{name: "totp", method: "totp"},
+		{name: "browser passkey", method: "passkey"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			transport := newWebTransport(false)
+			transport.session = &webSession{
+				client: client, baseURL: baseURL, insecure: true,
+				token: "web-token", tokenExpiresAt: time.Now().Add(10 * time.Minute),
+				expiresAt: time.Now().Add(time.Hour), username: "alice", cluster: "root",
+			}
+			challengeJSON, err := transport.beginForwardAuthorization(
+				`{"password":"forward-secret","method":"` + test.method + `","profileId":"profile-1"}`,
+			)
+			if err != nil {
+				t.Fatalf("begin forwarding authorization: %v", err)
+			}
+			var challenge struct {
+				Kind        string `json:"kind"`
+				ChallengeID string `json:"challengeId"`
+				BrowserURL  string `json:"browserUrl"`
+			}
+			if err := json.Unmarshal([]byte(challengeJSON), &challenge); err != nil {
+				t.Fatal(err)
+			}
+			if challenge.Kind != test.method || challenge.ChallengeID == "" {
+				t.Fatalf("unexpected forwarding challenge: %s", challengeJSON)
+			}
+			if test.method == "totp" {
+				_, err = transport.finishForwardTOTP(challenge.ChallengeID, "123456")
+			} else {
+				if !strings.HasSuffix(challenge.BrowserURL, "/web/mfa/browser/forward-browser-request") {
+					t.Fatalf("unexpected forwarding Browser MFA URL: %q", challenge.BrowserURL)
+				}
+				_, err = transport.finishForwardPasskey(
+					challenge.ChallengeID,
+					`{"id":"credential","response":{"signature":"value"},"clientExtensionResults":{}}`,
+				)
+			}
+			if err != nil {
+				t.Fatalf("finish forwarding authorization: %v", err)
+			}
+			statusJSON, err := transport.forwardAuthorizationStatus()
+			if err != nil || !strings.Contains(statusJSON, `"authorized":true`) {
+				t.Fatalf("forwarding authorization status = %q, error = %v", statusJSON, err)
+			}
+			snapshot, err := transport.exportSession()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(snapshot, "forward-secret") || strings.Contains(snapshot, "123456") || strings.Contains(snapshot, "signature") {
+				t.Fatal("saved session snapshot contains forwarding credentials")
+			}
+			restored := newWebTransport(false)
+			if _, err := restored.restoreSession(snapshot); err != nil {
+				t.Fatalf("restore forwarding identity: %v", err)
+			}
+			restoredStatus, err := restored.forwardAuthorizationStatus()
+			if err != nil || !strings.Contains(restoredStatus, `"authorized":true`) {
+				t.Fatalf("restored forwarding authorization status = %q, error = %v", restoredStatus, err)
+			}
+			if restored.session.sshProxyAddress != "proxy.example.test:3023" {
+				t.Fatalf("restored SSH proxy address = %q", restored.session.sshProxyAddress)
+			}
+		})
 	}
 }
 

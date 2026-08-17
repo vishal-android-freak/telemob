@@ -12,6 +12,7 @@ class ExpoTeleportModule extends NativeModule<ExpoTeleportModuleEvents> {
       nativeCoreLinked: false,
       passkey: false,
       totp: false,
+      localPortForwarding: false,
       developmentDriver: true,
     });
   }

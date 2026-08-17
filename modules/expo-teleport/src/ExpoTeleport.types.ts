@@ -3,7 +3,7 @@ export type ExpoTeleportModuleEvents = {
 };
 
 export type TerminalEventPayload = {
-  type: 'data' | 'closed' | 'error' | 'session';
+  type: 'data' | 'closed' | 'error' | 'session' | 'forward';
   sessionId?: string;
   profileId?: string;
   snapshot?: string;
@@ -22,4 +22,9 @@ export type TerminalEventPayload = {
   bellCount?: number;
   reason?: string;
   message?: string;
+  forward?: {
+    id: string;
+    state: 'connecting' | 'listening' | 'stopped' | 'error';
+    [key: string]: unknown;
+  };
 };

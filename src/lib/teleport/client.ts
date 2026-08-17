@@ -12,6 +12,10 @@ import {
 import type {
   AuthChallenge,
   AuthenticatedProfile,
+  ForwardAuthorizationRequest,
+  ForwardAuthorizationStatus,
+  LocalForward,
+  LocalForwardRequest,
   LoginRequest,
   SessionHandle,
   SessionTarget,
@@ -33,6 +37,14 @@ export interface TeleportClient {
     credentialJson?: string
   ): Promise<AuthenticatedProfile>;
   listServers(): Promise<TeleportServer[]>;
+  beginForwardAuthorization(request: ForwardAuthorizationRequest): Promise<AuthChallenge>;
+  finishForwardTotp(challengeId: string, code: string): Promise<ForwardAuthorizationStatus>;
+  finishForwardPasskey(challengeId: string, credentialJson?: string): Promise<ForwardAuthorizationStatus>;
+  forwardAuthorizationStatus(): Promise<ForwardAuthorizationStatus>;
+  startLocalForward(request: LocalForwardRequest): Promise<LocalForward>;
+  listLocalForwards(): Promise<LocalForward[]>;
+  stopLocalForward(id: string): Promise<void>;
+  stopAllLocalForwards(): Promise<void>;
   openSession(target: SessionTarget): Promise<SessionHandle>;
   writeSession(sessionId: string, data: string): Promise<void>;
   sendTerminalKey(
@@ -111,6 +123,14 @@ type NativeModuleShape = {
     credentialJson: string
   ): Promise<string>;
   listServersAsync(): Promise<string>;
+  beginForwardAuthorizationAsync(requestJson: string): Promise<string>;
+  finishForwardTotpAsync(challengeId: string, code: string): Promise<string>;
+  finishForwardPasskeyAsync(challengeId: string, credentialJson: string): Promise<string>;
+  forwardAuthorizationStatusAsync(): Promise<string>;
+  startLocalForwardAsync(requestJson: string): Promise<string>;
+  listLocalForwardsAsync(): Promise<string>;
+  stopLocalForwardAsync(id: string): Promise<void>;
+  stopAllLocalForwardsAsync(): Promise<void>;
   openSessionAsync(targetJson: string): Promise<string>;
   writeSessionAsync(sessionId: string, data: string): Promise<void>;
   sendTerminalKeyAsync(
@@ -194,6 +214,45 @@ class NativeTeleportClient implements TeleportClient {
       throw new Error('Teleport returned an invalid node list.');
     }
     return parsed.map(normalizeServer);
+  }
+
+  async beginForwardAuthorization(request: ForwardAuthorizationRequest) {
+    return JSON.parse(
+      await this.native.beginForwardAuthorizationAsync(JSON.stringify(request))
+    );
+  }
+
+  async finishForwardTotp(challengeId: string, code: string) {
+    return JSON.parse(await this.native.finishForwardTotpAsync(challengeId, code));
+  }
+
+  async finishForwardPasskey(challengeId: string, credentialJson = '') {
+    return JSON.parse(
+      await this.native.finishForwardPasskeyAsync(challengeId, credentialJson)
+    );
+  }
+
+  async forwardAuthorizationStatus() {
+    return JSON.parse(await this.native.forwardAuthorizationStatusAsync());
+  }
+
+  async startLocalForward(request: LocalForwardRequest) {
+    return JSON.parse(
+      await this.native.startLocalForwardAsync(JSON.stringify(request))
+    );
+  }
+
+  async listLocalForwards() {
+    const value: unknown = JSON.parse(await this.native.listLocalForwardsAsync());
+    return Array.isArray(value) ? value as LocalForward[] : [];
+  }
+
+  stopLocalForward(id: string) {
+    return this.native.stopLocalForwardAsync(id);
+  }
+
+  stopAllLocalForwards() {
+    return this.native.stopAllLocalForwardsAsync();
   }
 
   async openSession(target: SessionTarget) {
@@ -317,12 +376,16 @@ class DevelopmentTeleportClient implements TeleportClient {
   private sessions = new Map<string, { target: SessionTarget; input: string }>();
   private pendingLogins = new Map<string, LoginRequest>();
   private currentProfile: AuthenticatedProfile | undefined;
+  private pendingForwardAuthorization = new Set<string>();
+  private forwardAuthorizationExpiresAt = 0;
+  private forwards = new Map<string, LocalForward>();
 
   async capabilities(): Promise<TeleportCapabilities> {
     return {
       nativeCoreLinked: false,
       passkey: true,
       totp: true,
+      localPortForwarding: true,
       developmentDriver: true,
     };
   }
@@ -359,6 +422,9 @@ class DevelopmentTeleportClient implements TeleportClient {
     this.sessions.clear();
     this.outputs.clear();
     this.pendingLogins.clear();
+    this.pendingForwardAuthorization.clear();
+    this.forwardAuthorizationExpiresAt = 0;
+    await this.stopAllLocalForwards();
     this.currentProfile = undefined;
   }
 
@@ -432,6 +498,70 @@ class DevelopmentTeleportClient implements TeleportClient {
         status: 'unknown',
       },
     ];
+  }
+
+  async beginForwardAuthorization(request: ForwardAuthorizationRequest): Promise<AuthChallenge> {
+    if (!request.password || request.method !== 'totp') {
+      throw new Error('The development forwarder uses TOTP authorization.');
+    }
+    const challengeId = `forward-auth-${Date.now()}`;
+    this.pendingForwardAuthorization.add(challengeId);
+    return { kind: 'totp', challengeId, digits: 6 };
+  }
+
+  async finishForwardTotp(challengeId: string, code: string) {
+    if (!this.pendingForwardAuthorization.delete(challengeId) || !/^\d{6}$/.test(code)) {
+      throw new Error('Enter the six-digit code from your authenticator.');
+    }
+    this.forwardAuthorizationExpiresAt = Date.now() + 12 * 60 * 60 * 1000;
+    return this.forwardAuthorizationStatus();
+  }
+
+  async finishForwardPasskey(
+    _challengeId: string,
+    _credentialJson = ''
+  ): Promise<ForwardAuthorizationStatus> {
+    throw new Error('The development forwarder uses TOTP authorization.');
+  }
+
+  async forwardAuthorizationStatus(): Promise<ForwardAuthorizationStatus> {
+    return this.forwardAuthorizationExpiresAt > Date.now()
+      ? { authorized: true, validUntil: new Date(this.forwardAuthorizationExpiresAt).toISOString() }
+      : { authorized: false };
+  }
+
+  async startLocalForward(request: LocalForwardRequest) {
+    if (this.forwardAuthorizationExpiresAt <= Date.now()) {
+      throw new Error('Authorize port forwarding before starting a tunnel.');
+    }
+    const forward: LocalForward = {
+      ...request,
+      id: `forward-${Date.now()}`,
+      clusterName: request.clusterName ?? this.currentProfile?.clusterName ?? 'development',
+      localHost: '127.0.0.1',
+      localPort: request.localPort || 49152,
+      state: 'listening',
+      activeConnections: 0,
+      startedAt: new Date().toISOString(),
+    };
+    this.forwards.set(forward.id, forward);
+    this.emit({ type: 'forward', forward });
+    return forward;
+  }
+
+  async listLocalForwards() {
+    return [...this.forwards.values()];
+  }
+
+  async stopLocalForward(id: string) {
+    const forward = this.forwards.get(id);
+    if (!forward) return;
+    this.forwards.delete(id);
+    this.emit({ type: 'forward', forward: { ...forward, state: 'stopped' }, reason: 'Stopped on device' });
+  }
+
+  async stopAllLocalForwards() {
+    await Promise.all([...this.forwards.keys()].map(id => this.stopLocalForward(id)));
   }
 
   async openSession(target: SessionTarget): Promise<SessionHandle> {

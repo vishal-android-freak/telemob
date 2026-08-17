@@ -21,6 +21,8 @@ import {
 } from '@/components/shell-ui';
 import { palette, radius, space, type } from '@/constants/tokens';
 import { getResponsiveLayout, responsiveLayout } from '@/lib/layout/responsive';
+import { isRejectedSession } from '@/lib/network/recovery';
+import { useConnectivity } from '@/lib/network/use-connectivity';
 import { getTeleportClient } from '@/lib/teleport/client';
 import {
   activateSavedProfile,
@@ -46,6 +48,7 @@ export default function ConnectScreen() {
   const params = useLocalSearchParams<{ reason?: string; mode?: string; profileId?: string }>();
   const { height, width } = useWindowDimensions();
   const layout = getResponsiveLayout(width, height);
+  const connectivity = useConnectivity();
   const [proxyAddress, setProxyAddress] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -411,6 +414,12 @@ export default function ConnectScreen() {
               </Notice>
             ) : null}
 
+            {!connectivity.available ? (
+              <Notice tone="warning">
+                Device offline. Connect to Wi-Fi, cellular, or your private VPN before signing in.
+              </Notice>
+            ) : null}
+
             {challenge?.kind === 'totp' && (
               <View>
                 <FieldLabel>Authenticator code</FieldLabel>
@@ -488,12 +497,6 @@ function MethodButton({
 
 function messageFrom(error: unknown) {
   return error instanceof Error ? error.message : 'Authentication could not continue.';
-}
-
-function isRejectedSession(error: unknown) {
-  return /\bHTTP 401\b|Teleport login has expired|saved (?:Teleport|development) login (?:has expired|is incomplete)|decode saved Teleport login/i.test(
-    messageFrom(error)
-  );
 }
 
 const styles = StyleSheet.create({

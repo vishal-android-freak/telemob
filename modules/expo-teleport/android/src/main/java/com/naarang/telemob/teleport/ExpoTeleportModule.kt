@@ -44,6 +44,14 @@ class ExpoTeleportModule : Module() {
           TerminalForegroundService.release(context, event.optString("sessionId"))
         }
       }
+      if (event.optString("type") == "forward") {
+        val forward = event.optJSONObject("forward")
+        if (forward?.optString("state") in setOf("stopped", "error")) {
+          appContext.reactContext?.let { context ->
+            TerminalForegroundService.releaseForward(context, forward?.optString("id").orEmpty())
+          }
+        }
+      }
       sendEvent("onTerminalEvent", event.toMap())
     }
   }
@@ -181,6 +189,71 @@ class ExpoTeleportModule : Module() {
       } finally {
         browserMFARequests.remove(challengeID)
       }
+    }
+
+    AsyncFunction("beginForwardAuthorizationAsync") { requestJSON: String ->
+      core.beginForwardAuthorizationJSON(requestJSON).also { challengeJSON ->
+        val challenge = JSONObject(challengeJSON)
+        if (challenge.optString("kind") == "passkey") {
+          browserMFARequests[challenge.getString("challengeId")] = challenge.getString("browserUrl")
+        }
+      }
+    }
+
+    AsyncFunction("finishForwardTotpAsync") { challengeID: String, code: String ->
+      core.finishForwardTOTP(challengeID, code)
+    }
+
+    AsyncFunction("finishForwardPasskeyAsync") Coroutine { challengeID: String, credentialJSON: String ->
+      if (credentialJSON.isNotBlank()) {
+        return@Coroutine core.finishForwardPasskey(challengeID, credentialJSON)
+      }
+      val browserURL = browserMFARequests[challengeID]
+        ?: throw IllegalStateException("The Browser MFA challenge is missing or expired.")
+      val activity = appContext.currentActivity
+        ?: throw IllegalStateException("The app must be visible to open Browser MFA.")
+      withContext(Dispatchers.Main) {
+        activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(browserURL)))
+      }
+      try {
+        core.finishForwardPasskey(challengeID, "")
+      } finally {
+        browserMFARequests.remove(challengeID)
+      }
+    }
+
+    AsyncFunction("forwardAuthorizationStatusAsync") {
+      core.forwardAuthorizationStatusJSON()
+    }
+
+    AsyncFunction("startLocalForwardAsync") Coroutine { requestJSON: String ->
+      awaitNotificationPermission()
+      core.startLocalForwardJSON(requestJSON).also { forwardJSON ->
+        val forward = JSONObject(forwardJSON)
+        appContext.reactContext?.let { context ->
+          TerminalForegroundService.startForward(
+            context,
+            forward.getString("id"),
+            "${forward.optString("localHost")}:${forward.optInt("localPort")} → ${forward.optString("remoteHost")}:${forward.optInt("remotePort")}",
+          )
+        }
+      }
+    }
+
+    AsyncFunction("listLocalForwardsAsync") {
+      core.listLocalForwardsJSON()
+    }
+
+    AsyncFunction("stopLocalForwardAsync") { id: String ->
+      core.stopLocalForward(id)
+      appContext.reactContext?.let { context ->
+        TerminalForegroundService.releaseForward(context, id)
+      }
+    }
+
+    AsyncFunction("stopAllLocalForwardsAsync") {
+      core.stopAllLocalForwards()
+      appContext.reactContext?.let(TerminalForegroundService::releaseAllForwards)
     }
 
     AsyncFunction("listServersAsync") {

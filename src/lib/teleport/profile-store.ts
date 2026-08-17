@@ -5,6 +5,10 @@ import {
   clearAllNodePreferences,
   removeProfileNodePreferences,
 } from '@/lib/teleport/node-preferences';
+import {
+  clearAllForwardRules,
+  removeProfileForwardRules,
+} from '@/lib/teleport/forward-store';
 import type {
   AuthMethod,
   AuthenticatedProfile,
@@ -186,7 +190,10 @@ export function removeSavedProfile(profileId: string) {
     };
     return [updated, updated] as const;
   }).then(async store => {
-    await removeProfileNodePreferences(profileId);
+    await Promise.all([
+      removeProfileNodePreferences(profileId),
+      removeProfileForwardRules(profileId),
+    ]);
     return store;
   });
 }
@@ -199,6 +206,7 @@ export function clearAllProfiles() {
       removeValue(legacyProfileKey),
       removeValue(legacySessionKey),
       clearAllNodePreferences(store.profiles.map(profile => profile.id)),
+      clearAllForwardRules(store.profiles.map(profile => profile.id)),
       ...store.profiles.map(profile => removeValue(profileSessionKey(profile.id))),
     ]);
   });

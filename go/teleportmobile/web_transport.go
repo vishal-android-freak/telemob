@@ -41,11 +41,13 @@ type webTransport struct {
 	mu      sync.Mutex
 	renewMu sync.Mutex
 
-	insecure  bool
-	pending   map[string]*pendingWebLogin
-	session   *webSession
-	terminals map[string]*webTerminal
-	emit      func(map[string]any)
+	insecure       bool
+	pending        map[string]*pendingWebLogin
+	forwardPending map[string]*pendingForwardAuthorization
+	session        *webSession
+	terminals      map[string]*webTerminal
+	forwarder      *forwardManager
+	emit           func(map[string]any)
 }
 
 type pendingWebLogin struct {
@@ -71,14 +73,17 @@ type browserMFAResult struct {
 }
 
 type webSession struct {
-	client         *http.Client
-	baseURL        *url.URL
-	insecure       bool
-	token          string
-	tokenExpiresAt time.Time
-	expiresAt      time.Time
-	username       string
-	cluster        string
+	client            *http.Client
+	baseURL           *url.URL
+	insecure          bool
+	token             string
+	tokenExpiresAt    time.Time
+	expiresAt         time.Time
+	username          string
+	cluster           string
+	sshIdentity       *persistedSSHIdentity
+	sshProxyAddress   string
+	tlsRoutingEnabled bool
 }
 
 type webTerminal struct {
@@ -92,20 +97,24 @@ type webTerminal struct {
 }
 
 type persistedWebSession struct {
-	Version        int       `json:"version"`
-	ProxyAddress   string    `json:"proxyAddress"`
-	SessionCookie  string    `json:"sessionCookie"`
-	Token          string    `json:"token"`
-	TokenExpiresAt time.Time `json:"tokenExpiresAt"`
-	ExpiresAt      time.Time `json:"expiresAt"`
-	Username       string    `json:"username"`
-	Cluster        string    `json:"cluster"`
-	Insecure       bool      `json:"insecure"`
+	Version           int                   `json:"version"`
+	ProxyAddress      string                `json:"proxyAddress"`
+	SessionCookie     string                `json:"sessionCookie"`
+	Token             string                `json:"token"`
+	TokenExpiresAt    time.Time             `json:"tokenExpiresAt"`
+	ExpiresAt         time.Time             `json:"expiresAt"`
+	Username          string                `json:"username"`
+	Cluster           string                `json:"cluster"`
+	Insecure          bool                  `json:"insecure"`
+	SSHIdentity       *persistedSSHIdentity `json:"sshIdentity,omitempty"`
+	SSHProxyAddress   string                `json:"sshProxyAddress,omitempty"`
+	TLSRoutingEnabled bool                  `json:"tlsRoutingEnabled,omitempty"`
 }
 
 type proxyPing struct {
 	ClusterName   string `json:"cluster_name"`
 	ServerVersion string `json:"server_version"`
+	FIPS          bool   `json:"fips"`
 	Auth          struct {
 		Type              string `json:"type"`
 		SecondFactor      string `json:"second_factor"`
@@ -115,6 +124,15 @@ type proxyPing struct {
 			RPID string `json:"rp_id"`
 		} `json:"webauthn"`
 	} `json:"auth"`
+	Proxy struct {
+		TLSRoutingEnabled bool `json:"tls_routing_enabled"`
+		SSH               struct {
+			ListenAddr    string `json:"listen_addr"`
+			WebListenAddr string `json:"web_listen_addr"`
+			PublicAddr    string `json:"public_addr"`
+			SSHPublicAddr string `json:"ssh_public_addr"`
+		} `json:"ssh"`
+	} `json:"proxy"`
 }
 
 type mfaChallenge struct {
@@ -160,11 +178,14 @@ type terminalEnvelope struct {
 }
 
 func newWebTransport(insecure bool) *webTransport {
-	return &webTransport{
-		insecure:  insecure,
-		pending:   make(map[string]*pendingWebLogin),
-		terminals: make(map[string]*webTerminal),
+	w := &webTransport{
+		insecure:       insecure,
+		pending:        make(map[string]*pendingWebLogin),
+		forwardPending: make(map[string]*pendingForwardAuthorization),
+		terminals:      make(map[string]*webTerminal),
 	}
+	w.forwarder = newForwardManager(teleportForwardDialer{}, w.sendEvent)
+	return w
 }
 
 func (w *webTransport) beginLogin(requestJSON string) (string, error) {
@@ -378,14 +399,16 @@ func (w *webTransport) commitLogin(challengeID string, pending *pendingWebLogin,
 		expiresAt = tokenExpiresAt
 	}
 	session := &webSession{
-		client:         pending.client,
-		baseURL:        pending.baseURL,
-		insecure:       w.insecure || pending.request.Insecure,
-		token:          response.Token,
-		tokenExpiresAt: tokenExpiresAt,
-		expiresAt:      expiresAt,
-		username:       pending.request.Username,
-		cluster:        pending.ping.ClusterName,
+		client:            pending.client,
+		baseURL:           pending.baseURL,
+		insecure:          w.insecure || pending.request.Insecure,
+		token:             response.Token,
+		tokenExpiresAt:    tokenExpiresAt,
+		expiresAt:         expiresAt,
+		username:          pending.request.Username,
+		cluster:           pending.ping.ClusterName,
+		sshProxyAddress:   resolveSSHProxyAddress(pending.baseURL, pending.ping),
+		tlsRoutingEnabled: pending.ping.Proxy.TLSRoutingEnabled,
 	}
 
 	w.renewMu.Lock()
@@ -461,15 +484,18 @@ func persistedSessionJSON(session *webSession) (string, error) {
 		return "", err
 	}
 	return marshal(persistedWebSession{
-		Version:        1,
-		ProxyAddress:   session.baseURL.String(),
-		SessionCookie:  cookie.Value,
-		Token:          session.token,
-		TokenExpiresAt: session.tokenExpiresAt,
-		ExpiresAt:      session.expiresAt,
-		Username:       session.username,
-		Cluster:        session.cluster,
-		Insecure:       session.insecure,
+		Version:           2,
+		ProxyAddress:      session.baseURL.String(),
+		SessionCookie:     cookie.Value,
+		Token:             session.token,
+		TokenExpiresAt:    session.tokenExpiresAt,
+		ExpiresAt:         session.expiresAt,
+		Username:          session.username,
+		Cluster:           session.cluster,
+		Insecure:          session.insecure,
+		SSHIdentity:       session.sshIdentity,
+		SSHProxyAddress:   session.sshProxyAddress,
+		TLSRoutingEnabled: session.tlsRoutingEnabled,
 	})
 }
 
@@ -478,7 +504,7 @@ func (w *webTransport) restoreSession(snapshotJSON string) (string, error) {
 	if err := json.Unmarshal([]byte(snapshotJSON), &snapshot); err != nil {
 		return "", fmt.Errorf("decode saved Teleport login: %w", err)
 	}
-	if snapshot.Version != 1 || snapshot.SessionCookie == "" || snapshot.Token == "" || snapshot.Username == "" || snapshot.Cluster == "" {
+	if (snapshot.Version != 1 && snapshot.Version != 2) || snapshot.SessionCookie == "" || snapshot.Token == "" || snapshot.Username == "" || snapshot.Cluster == "" {
 		return "", errors.New("the saved Teleport login is incomplete")
 	}
 	if snapshot.ExpiresAt.IsZero() || time.Now().After(snapshot.ExpiresAt) {
@@ -496,14 +522,17 @@ func (w *webTransport) restoreSession(snapshotJSON string) (string, error) {
 		Name: sessionCookieName, Value: snapshot.SessionCookie, Path: "/", Secure: true, HttpOnly: true,
 	}})
 	session := &webSession{
-		client:         client,
-		baseURL:        baseURL,
-		insecure:       snapshot.Insecure,
-		token:          snapshot.Token,
-		tokenExpiresAt: snapshot.TokenExpiresAt,
-		expiresAt:      snapshot.ExpiresAt,
-		username:       snapshot.Username,
-		cluster:        snapshot.Cluster,
+		client:            client,
+		baseURL:           baseURL,
+		insecure:          snapshot.Insecure,
+		token:             snapshot.Token,
+		tokenExpiresAt:    snapshot.TokenExpiresAt,
+		expiresAt:         snapshot.ExpiresAt,
+		username:          snapshot.Username,
+		cluster:           snapshot.Cluster,
+		sshIdentity:       snapshot.SSHIdentity,
+		sshProxyAddress:   snapshot.SSHProxyAddress,
+		tlsRoutingEnabled: snapshot.TLSRoutingEnabled,
 	}
 	w.renewMu.Lock()
 	defer w.renewMu.Unlock()
@@ -521,6 +550,7 @@ func (w *webTransport) restoreSession(snapshotJSON string) (string, error) {
 }
 
 func (w *webTransport) logout() {
+	w.forwarder.stopAll("Signed out")
 	w.renewMu.Lock()
 	w.mu.Lock()
 	w.session = nil
@@ -530,7 +560,15 @@ func (w *webTransport) logout() {
 			pending.browser.close()
 		}
 	}
+	for _, pending := range w.forwardPending {
+		pending.password = ""
+		pending.request.Password = ""
+		if pending.browser != nil {
+			pending.browser.close()
+		}
+	}
 	w.pending = make(map[string]*pendingWebLogin)
+	w.forwardPending = make(map[string]*pendingForwardAuthorization)
 	terminals := w.terminals
 	w.terminals = make(map[string]*webTerminal)
 	w.mu.Unlock()
@@ -879,14 +917,17 @@ func (w *webTransport) freshSession() (*webSession, error) {
 		expiresAt = session.expiresAt
 	}
 	renewed := &webSession{
-		client:         session.client,
-		baseURL:        session.baseURL,
-		insecure:       session.insecure,
-		token:          response.Token,
-		tokenExpiresAt: tokenExpiresAt,
-		expiresAt:      expiresAt,
-		username:       session.username,
-		cluster:        session.cluster,
+		client:            session.client,
+		baseURL:           session.baseURL,
+		insecure:          session.insecure,
+		token:             response.Token,
+		tokenExpiresAt:    tokenExpiresAt,
+		expiresAt:         expiresAt,
+		username:          session.username,
+		cluster:           session.cluster,
+		sshIdentity:       session.sshIdentity,
+		sshProxyAddress:   session.sshProxyAddress,
+		tlsRoutingEnabled: session.tlsRoutingEnabled,
 	}
 	w.mu.Lock()
 	if w.session == session {
@@ -918,6 +959,38 @@ func profileForWebSession(session *webSession) authenticatedProfile {
 		ClusterName:  session.cluster,
 		ValidUntil:   session.expiresAt.UTC().Format(time.RFC3339),
 	}
+}
+
+func resolveSSHProxyAddress(baseURL *url.URL, ping proxyPing) string {
+	if ping.Proxy.TLSRoutingEnabled {
+		if baseURL.Port() != "" {
+			return baseURL.Host
+		}
+		return net.JoinHostPort(baseURL.Hostname(), "443")
+	}
+	if value := strings.TrimSpace(ping.Proxy.SSH.SSHPublicAddr); value != "" {
+		return hostPortWithDefault(value, "3023")
+	}
+	host := baseURL.Hostname()
+	if value := strings.TrimSpace(ping.Proxy.SSH.PublicAddr); value != "" {
+		if parsedHost, _, err := net.SplitHostPort(value); err == nil {
+			host = parsedHost
+		} else if !strings.Contains(value, ":") {
+			host = value
+		}
+	}
+	port := "3023"
+	if _, parsedPort, err := net.SplitHostPort(ping.Proxy.SSH.ListenAddr); err == nil && parsedPort != "" {
+		port = parsedPort
+	}
+	return net.JoinHostPort(strings.Trim(host, "[]"), port)
+}
+
+func hostPortWithDefault(address, defaultPort string) string {
+	if host, port, err := net.SplitHostPort(address); err == nil && port != "" {
+		return net.JoinHostPort(strings.Trim(host, "[]"), port)
+	}
+	return net.JoinHostPort(strings.Trim(address, "[]"), defaultPort)
 }
 
 func (w *webTransport) pendingLogin(challengeID, method string) (*pendingWebLogin, error) {

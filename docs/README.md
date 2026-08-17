@@ -9,6 +9,8 @@ with, endorsed by, or maintained by Gravitational Inc. or the Teleport project.
   generated artifacts.
 - [Privacy and data flow](privacy.md) — credentials, storage, network
   destinations, device access, and insecure TLS.
+- [Port forwarding](port-forwarding.md) — local listener behavior,
+  authorization, platform limits, and security model.
 - [Releases](releases.md) — stable/beta tags, EAS profiles, credentials, and
   GitHub Actions behavior.
 - [Terminal keyboard](terminal-keyboard.md) — key rail, direct input, modifiers,

@@ -37,6 +37,15 @@ public final class ExpoTeleportModule: Module {
       {
         BackgroundTerminalLease.shared.stop(sessionID: sessionID)
       }
+      if
+        eventPayload["type"] as? String == "forward",
+        let forward = eventPayload["forward"] as? [String: Any],
+        let forwardID = forward["id"] as? String,
+        let state = forward["state"] as? String,
+        state == "stopped" || state == "error"
+      {
+        BackgroundTerminalLease.shared.stop(sessionID: "forward:\(forwardID)")
+      }
       self?.sendEvent("onTerminalEvent", eventPayload)
     }
   }
@@ -225,6 +234,115 @@ public final class ExpoTeleportModule: Module {
       }
     }.runOnQueue(.main)
 
+    AsyncFunction("beginForwardAuthorizationAsync") { (requestJSON: String) throws -> String in
+      let challengeJSON = try callGo { error in
+        core.beginForwardAuthorizationJSON(requestJSON, error: error)
+      }
+      if
+        let data = challengeJSON.data(using: .utf8),
+        let challenge = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        challenge["kind"] as? String == "passkey",
+        let challengeID = challenge["challengeId"] as? String,
+        let browserURLString = challenge["browserUrl"] as? String,
+        let browserURL = URL(string: browserURLString)
+      {
+        browserMFARequests[challengeID] = browserURL
+      }
+      return challengeJSON
+    }
+
+    AsyncFunction("finishForwardTotpAsync") { (challengeID: String, code: String) throws -> String in
+      try callGo { error in
+        core.finishForwardTOTP(challengeID, code: code, error: error)
+      }
+    }
+
+    AsyncFunction("finishForwardPasskeyAsync") { [weak self] (challengeID: String, credentialJSON: String, promise: Promise) in
+      guard let self else {
+        promise.reject(ModuleUnavailableException())
+        return
+      }
+      if !credentialJSON.isEmpty {
+        do {
+          promise.resolve(try callGo { error in
+            self.core.finishForwardPasskey(challengeID, credentialJSON: credentialJSON, error: error)
+          })
+        } catch {
+          promise.reject(error)
+        }
+        return
+      }
+      guard let browserURL = browserMFARequests[challengeID] else {
+        promise.reject(BrowserMFAChallengeException())
+        return
+      }
+      BrowserMFALease.shared.start()
+      UIApplication.shared.open(browserURL) { [weak self] opened in
+        guard let self else {
+          BrowserMFALease.shared.stop()
+          promise.reject(ModuleUnavailableException())
+          return
+        }
+        guard opened else {
+          BrowserMFALease.shared.stop()
+          browserMFARequests.removeValue(forKey: challengeID)
+          promise.reject(BrowserMFAPresentationException())
+          return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+          defer {
+            DispatchQueue.main.async {
+              self.browserMFARequests.removeValue(forKey: challengeID)
+              BrowserMFALease.shared.stop()
+            }
+          }
+          do {
+            promise.resolve(try callGo { error in
+              self.core.finishForwardPasskey(challengeID, credentialJSON: "", error: error)
+            })
+          } catch {
+            promise.reject(error)
+          }
+        }
+      }
+    }.runOnQueue(.main)
+
+    AsyncFunction("forwardAuthorizationStatusAsync") { () throws -> String in
+      try callGo { error in
+        core.forwardAuthorizationStatusJSON(error)
+      }
+    }
+
+    AsyncFunction("startLocalForwardAsync") { (requestJSON: String) throws -> String in
+      let forwardJSON = try callGo { error in
+        core.startLocalForwardJSON(requestJSON, error: error)
+      }
+      if
+        let data = forwardJSON.data(using: .utf8),
+        let forward = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let forwardID = forward["id"] as? String
+      {
+        BackgroundTerminalLease.shared.start(sessionID: "forward:\(forwardID)")
+      }
+      return forwardJSON
+    }
+
+    AsyncFunction("listLocalForwardsAsync") { () throws -> String in
+      try callGo { error in
+        core.listLocalForwardsJSON(error)
+      }
+    }
+
+    AsyncFunction("stopLocalForwardAsync") { (id: String) in
+      core.stopLocalForward(id)
+      BackgroundTerminalLease.shared.stop(sessionID: "forward:\(id)")
+    }
+
+    AsyncFunction("stopAllLocalForwardsAsync") {
+      core.stopAllLocalForwards()
+      BackgroundTerminalLease.shared.stopAllForwards()
+    }
+
     AsyncFunction("listServersAsync") { () throws -> String in
       try callGo { error in
         core.listServersJSON(error)
@@ -410,6 +528,14 @@ private final class BackgroundTerminalLease {
     DispatchQueue.main.async { [weak self] in
       self?.activeSessionIDs.removeAll()
       self?.endTaskOnMainQueue()
+    }
+  }
+
+  func stopAllForwards() {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      activeSessionIDs = Set(activeSessionIDs.filter { !$0.hasPrefix("forward:") })
+      if activeSessionIDs.isEmpty { endTaskOnMainQueue() }
     }
   }
 

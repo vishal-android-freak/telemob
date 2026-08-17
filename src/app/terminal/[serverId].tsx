@@ -117,6 +117,7 @@ function TerminalScreen({
   const remoteMouseLastCellRef = useRef<{ column: number; row: number } | null>(null);
   const remoteMouseWriteRef = useRef<Promise<void>>(Promise.resolve());
   const connected = session.state === 'connected';
+  const needsSignIn = session.connectionIssueKind === 'session-expired';
   const pendingDisconnectTab = terminalWorkspace.tabs.find(
     tab => tab.tabId === pendingDisconnectTabId
   );
@@ -245,6 +246,22 @@ function TerminalScreen({
     setCommand('');
     await manager.sendKey('text', value).catch(() => undefined);
     await manager.sendKey('enter').catch(() => undefined);
+  }
+
+  function recoverTerminal() {
+    Keyboard.dismiss();
+    if (needsSignIn) {
+      router.dismissTo({
+        pathname: '/',
+        params: {
+          mode: 'signin',
+          profileId: session.profileId,
+          reason: 'session-expired',
+        },
+      });
+      return;
+    }
+    void manager.retry();
   }
 
   async function sendTerminalKey(key: string) {
@@ -740,7 +757,28 @@ function TerminalScreen({
 
             {session.error ? (
               <View style={styles.errorBanner}>
-                <Text numberOfLines={2} style={styles.errorText}>{session.error}</Text>
+                <View style={styles.errorCopy}>
+                  <Text numberOfLines={2} style={styles.errorText}>{session.error}</Text>
+                  {session.state === 'reconnecting' && session.retryAttempt > 0 ? (
+                    <Text style={styles.retryStatus}>
+                      RETRY {session.retryAttempt} OF 5
+                    </Text>
+                  ) : null}
+                </View>
+                {session.state === 'error' && (session.retryable || needsSignIn) ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={recoverTerminal}
+                    style={({ pressed }) => [
+                      styles.recoveryButton,
+                      pressed && styles.recoveryButtonPressed,
+                    ]}
+                  >
+                    <Text style={styles.recoveryButtonText}>
+                      {needsSignIn ? 'SIGN IN' : 'RETRY'}
+                    </Text>
+                  </Pressable>
+                ) : null}
               </View>
             ) : null}
 
@@ -1072,10 +1110,24 @@ const styles = StyleSheet.create({
     borderLeftColor: palette.warning,
     borderLeftWidth: 3,
     backgroundColor: palette.deep,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
     paddingHorizontal: space.sm,
     paddingVertical: 8,
   },
+  errorCopy: { flex: 1, minWidth: 0, gap: 2 },
   errorText: { color: palette.warning, fontFamily: type.monoMedium, fontSize: 10, lineHeight: 14 },
+  retryStatus: { color: palette.quiet, fontFamily: type.monoMedium, fontSize: 8, letterSpacing: 0.5 },
+  recoveryButton: {
+    minHeight: 28,
+    justifyContent: 'center',
+    borderColor: palette.warning,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: space.sm,
+  },
+  recoveryButtonPressed: { backgroundColor: palette.raised },
+  recoveryButtonText: { color: palette.warning, fontFamily: type.monoStrong, fontSize: 8, letterSpacing: 0.5 },
   inputDock: { borderTopColor: palette.rule, borderTopWidth: StyleSheet.hairlineWidth, backgroundColor: palette.deep },
   searchRow: {
     minHeight: 38,

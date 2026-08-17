@@ -99,10 +99,21 @@ export function ConnectionRail({
   );
 }
 
-export function Notice({ children, tone = 'quiet' }: PropsWithChildren<{ tone?: 'quiet' | 'error' }>) {
+export function Notice({
+  children,
+  tone = 'quiet',
+}: PropsWithChildren<{ tone?: 'quiet' | 'error' | 'warning' }>) {
   return (
-    <View style={[styles.notice, tone === 'error' && styles.noticeError]}>
-      <Text style={[styles.noticeText, tone === 'error' && styles.noticeErrorText]}>
+    <View style={[
+      styles.notice,
+      tone === 'error' && styles.noticeError,
+      tone === 'warning' && styles.noticeWarning,
+    ]}>
+      <Text style={[
+        styles.noticeText,
+        tone === 'error' && styles.noticeErrorText,
+        tone === 'warning' && styles.noticeWarningText,
+      ]}>
         {children}
       </Text>
     </View>
@@ -204,6 +215,8 @@ const styles = StyleSheet.create({
   },
   noticeError: { borderLeftColor: palette.danger },
   noticeErrorText: { color: palette.danger },
+  noticeWarning: { borderLeftColor: palette.warning },
+  noticeWarningText: { color: palette.warning },
   panel: {
     borderColor: palette.rule,
     borderWidth: 1,

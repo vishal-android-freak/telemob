@@ -15,6 +15,14 @@ declare class ExpoTeleportModule extends NativeModule<ExpoTeleportModuleEvents> 
     credentialJson: string
   ): Promise<string>;
   listServersAsync(): Promise<string>;
+  beginForwardAuthorizationAsync(requestJson: string): Promise<string>;
+  finishForwardTotpAsync(challengeId: string, code: string): Promise<string>;
+  finishForwardPasskeyAsync(challengeId: string, credentialJson: string): Promise<string>;
+  forwardAuthorizationStatusAsync(): Promise<string>;
+  startLocalForwardAsync(requestJson: string): Promise<string>;
+  listLocalForwardsAsync(): Promise<string>;
+  stopLocalForwardAsync(id: string): Promise<void>;
+  stopAllLocalForwardsAsync(): Promise<void>;
   openSessionAsync(targetJson: string): Promise<string>;
   writeSessionAsync(sessionId: string, data: string): Promise<void>;
   sendTerminalKeyAsync(

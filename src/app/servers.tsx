@@ -21,6 +21,17 @@ import {
 import { ThemedConfirmDialog } from '@/components/themed-confirm-dialog';
 import { palette, radius, space, type } from '@/constants/tokens';
 import { getResponsiveLayout, responsiveLayout } from '@/lib/layout/responsive';
+import { getConnectivitySnapshot } from '@/lib/network/connectivity';
+import {
+  classifyConnectionError,
+  rawErrorMessage,
+  type ConnectionIssue,
+} from '@/lib/network/recovery';
+import {
+  runWithConnectionRetry,
+  type ConnectionRetryProgress,
+} from '@/lib/network/retry';
+import { useConnectivity } from '@/lib/network/use-connectivity';
 import {
   createDefaultNodePreferences,
   loadProfileNodePreferences,
@@ -50,6 +61,7 @@ export default function ServersScreen() {
   const router = useRouter();
   const { height, width } = useWindowDimensions();
   const layout = getResponsiveLayout(width, height);
+  const connectivity = useConnectivity();
   const [listWidth, setListWidth] = useState(0);
   const [savedProfile, setSavedProfile] = useState<SavedTeleportProfile | null>(null);
   const [profiles, setProfiles] = useState<SavedTeleportProfile[]>([]);
@@ -58,6 +70,8 @@ export default function ServersScreen() {
   const [nodePreferences, setNodePreferences] = useState(createDefaultNodePreferences);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [error, setError] = useState('');
+  const [connectionIssue, setConnectionIssue] = useState<ConnectionIssue | null>(null);
+  const [retryProgress, setRetryProgress] = useState<ConnectionRetryProgress | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshRequest, setRefreshRequest] = useState(0);
@@ -67,6 +81,8 @@ export default function ServersScreen() {
   const [terminalWorkspace, setTerminalWorkspace] = useState(workspace.getSnapshot);
   const activeProfileIdRef = useRef<string | null>(null);
   const loadedOnceRef = useRef(false);
+  const failedNetworkGenerationRef = useRef<number | null>(null);
+  const observedNetworkGenerationRef = useRef(connectivity.generation);
 
   useEffect(() => {
     activeProfileIdRef.current = savedProfile?.id ?? null;
@@ -102,9 +118,31 @@ export default function ServersScreen() {
   }, [workspace]);
 
   useEffect(() => {
+    const previous = observedNetworkGenerationRef.current;
+    observedNetworkGenerationRef.current = connectivity.generation;
+    if (
+      previous === connectivity.generation
+      || !loadedOnceRef.current
+      || !connectivity.available
+      || failedNetworkGenerationRef.current === null
+      || failedNetworkGenerationRef.current === connectivity.generation
+    ) {
+      return;
+    }
+    failedNetworkGenerationRef.current = null;
+    setRefreshing(true);
+    setRefreshRequest(request => request + 1);
+  }, [connectivity.available, connectivity.generation]);
+
+  useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     async function loadServers() {
-      if (active) setError('');
+      if (active) {
+        setError('');
+        setConnectionIssue(null);
+        setRetryProgress(null);
+      }
       try {
         const [nextProfile, nextProfiles] = await Promise.all([
           loadActiveSavedProfile(),
@@ -114,35 +152,54 @@ export default function ServersScreen() {
           router.replace('/');
           return;
         }
-        const [nextServers, nextNodePreferences] = await Promise.all([
-          withSavedProfile(nextProfile.id, client => client.listServers()),
-          loadProfileNodePreferences(nextProfile.id),
-        ]);
+        if (active) {
+          setSavedProfile(nextProfile);
+          setProfiles(nextProfiles);
+        }
+        const nextNodePreferences = await loadProfileNodePreferences(nextProfile.id);
+        const nextServers = await runWithConnectionRetry(
+          () => withSavedProfile(nextProfile.id, client => client.listServers()),
+          {
+            maxAttempts: 4,
+            signal: controller.signal,
+            onRetry: progress => {
+              if (!active) return;
+              setRetryProgress(progress);
+              setConnectionIssue(progress.issue);
+            },
+          }
+        );
         if (!active) return;
         setSavedProfile(nextProfile);
         setProfiles(nextProfiles);
         setServers(Array.isArray(nextServers) ? nextServers : []);
         setNodePreferences(nextNodePreferences);
+        setConnectionIssue(null);
+        setRetryProgress(null);
+        failedNetworkGenerationRef.current = null;
       } catch (loadError) {
-        if (isRejectedSession(loadError)) {
+        if (controller.signal.aborted) return;
+        const issue = classifyConnectionError(loadError, getConnectivitySnapshot());
+        if (issue.requiresAuthentication) {
           const rejected = await loadActiveSavedProfile();
           if (rejected) {
             await workspace.disconnectProfile(rejected.id);
-            await signOutSavedProfile(rejected.id);
+            const signedOut = await signOutSavedProfile(rejected.id);
+            if (active) setSavedProfile(signedOut);
           }
           if (active) {
-            router.replace({
-              pathname: '/',
-              params: {
-                mode: 'signin',
-                profileId: rejected?.id,
-                reason: 'session-expired',
-              },
-            });
+            setConnectionIssue(issue);
+            setRetryProgress(null);
+            setError(issue.message);
           }
           return;
         }
-        if (active) setError(messageFrom(loadError));
+        if (active) {
+          setConnectionIssue(issue);
+          setRetryProgress(null);
+          setError(issue.message);
+          failedNetworkGenerationRef.current = getConnectivitySnapshot().generation;
+        }
       } finally {
         if (active) {
           loadedOnceRef.current = true;
@@ -154,6 +211,7 @@ export default function ServersScreen() {
     void loadServers();
     return () => {
       active = false;
+      controller.abort();
     };
   }, [refreshRequest, router, workspace]);
 
@@ -221,6 +279,19 @@ export default function ServersScreen() {
     });
   }
 
+  function openForward(server: TeleportServer, login: string) {
+    if (!savedProfile) return;
+    router.push({
+      pathname: '/forwards',
+      params: {
+        serverId: server.id,
+        hostname: server.hostname,
+        login,
+        clusterName: server.clusterName ?? savedProfile.profile.clusterName,
+      },
+    } as unknown as Href);
+  }
+
   async function switchProfile(profileId: string) {
     if (profileId === savedProfile?.id) {
       setProfileMenuOpen(false);
@@ -253,6 +324,17 @@ export default function ServersScreen() {
   }
 
   function refreshServers() {
+    if (connectionIssue?.requiresAuthentication) {
+      router.dismissTo({
+        pathname: '/',
+        params: {
+          mode: 'signin',
+          profileId: savedProfile?.id,
+          reason: 'session-expired',
+        },
+      });
+      return;
+    }
     if (refreshing) return;
     setRefreshing(true);
     setRefreshRequest(request => request + 1);
@@ -328,14 +410,24 @@ export default function ServersScreen() {
             </View>
             <Text style={styles.profileChevron}>{profileMenuOpen ? '⌃' : '⌄'}</Text>
           </Pressable>
-          <Pressable
-            accessibilityLabel={`Sign out of ${savedProfile?.name ?? 'Teleport profile'}`}
-            accessibilityRole="button"
-            onPress={confirmSignOut}
-            hitSlop={10}
-          >
-            <Text style={styles.signOut}>Sign out</Text>
-          </Pressable>
+          <View style={styles.topActions}>
+            <Pressable
+              accessibilityLabel="Manage port forwards"
+              accessibilityRole="button"
+              onPress={() => router.push('/forwards' as Href)}
+              hitSlop={8}
+            >
+              <Text style={styles.forwardsLink}>⇄ Port forwards</Text>
+            </Pressable>
+            <Pressable
+              accessibilityLabel={`Sign out of ${savedProfile?.name ?? 'Teleport profile'}`}
+              accessibilityRole="button"
+              onPress={confirmSignOut}
+              hitSlop={10}
+            >
+              <Text style={styles.signOut}>Sign out</Text>
+            </Pressable>
+          </View>
         </View>
 
         {profileMenuOpen ? (
@@ -402,6 +494,19 @@ export default function ServersScreen() {
           && savedProfile.profile.username === 'play-review' ? (
             <Notice>Offline store-review demo active. No external proxy is connected.</Notice>
           ) : null}
+
+        {!connectivity.available ? (
+          <Notice tone="warning">
+            Device offline. Node discovery will continue when a network connection returns.
+          </Notice>
+        ) : retryProgress ? (
+          <Notice tone="warning">
+            {retryProgress.issue.message}{' '}
+            {retryProgress.delayMs === null
+              ? 'Waiting for a network connection.'
+              : `Retry ${retryProgress.nextAttempt} of 4 in ${formatRetryDelay(retryProgress.delayMs)}.`}
+          </Notice>
+        ) : null}
 
         <Field
           accessibilityLabel="Filter servers"
@@ -488,7 +593,7 @@ export default function ServersScreen() {
           <View style={styles.errorBlock}>
             <Notice tone="error">{error}</Notice>
             <PrimaryButton loading={refreshing} onPress={refreshServers}>
-              Retry
+              {connectionIssue?.requiresAuthentication ? 'Sign in again' : 'Retry'}
             </PrimaryButton>
           </View>
         ) : null}
@@ -519,6 +624,7 @@ export default function ServersScreen() {
                   width={cardWidth}
                   onToggleFavorite={() => toggleFavorite(server.id)}
                   onOpen={openServer}
+                  onOpenForward={openForward}
                 />
               ))}
             </View>
@@ -564,6 +670,7 @@ function ServerCard({
   width,
   onToggleFavorite,
   onOpen,
+  onOpenForward,
 }: {
   activeLogins: string[];
   compact: boolean;
@@ -573,6 +680,7 @@ function ServerCard({
   width?: number;
   onToggleFavorite: () => void;
   onOpen: (server: TeleportServer, login: string, forceNew?: boolean) => void;
+  onOpenForward: (server: TeleportServer, login: string) => void;
 }) {
   const preferredLogin = recent && server.logins?.includes(recent.preferredLogin)
     ? recent.preferredLogin
@@ -691,6 +799,14 @@ function ServerCard({
                     <Text style={styles.newShellText}>＋</Text>
                   </Pressable>
                 ) : null}
+                <Pressable
+                  accessibilityLabel={`Create a port forward through ${login} on ${server.hostname}`}
+                  accessibilityRole="button"
+                  onPress={() => onOpenForward(server, login)}
+                  style={({ pressed }) => [styles.forwardButton, pressed && styles.pressed]}
+                >
+                  <Text style={styles.forwardButtonText}>⇄</Text>
+                </Pressable>
               </View>
             );
           })}
@@ -840,13 +956,12 @@ function formatRelativeTime(value: string) {
 }
 
 function messageFrom(error: unknown) {
-  return error instanceof Error ? error.message : 'Could not load servers.';
+  return rawErrorMessage(error);
 }
 
-function isRejectedSession(error: unknown) {
-  return /\bHTTP 401\b|Teleport login has expired|saved (?:Teleport|development) login (?:has expired|is incomplete)|decode saved Teleport login/i.test(
-    messageFrom(error)
-  );
+function formatRetryDelay(delayMs: number) {
+  const seconds = Math.max(1, Math.ceil(delayMs / 1000));
+  return `${seconds}s`;
 }
 
 const styles = StyleSheet.create({
@@ -856,6 +971,8 @@ const styles = StyleSheet.create({
   contentShort: { paddingVertical: space.md },
   page: { width: '100%', maxWidth: responsiveLayout.contentMaxWidth, gap: space.lg },
   topline: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  topActions: { flexDirection: 'row', alignItems: 'center', gap: space.md },
+  forwardsLink: { color: palette.signal, fontFamily: type.monoMedium, fontSize: 9 },
   identity: { minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: space.sm, flex: 1 },
   identityCopy: { minWidth: 0, flex: 1 },
   liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: palette.signal },
@@ -976,6 +1093,16 @@ const styles = StyleSheet.create({
     backgroundColor: palette.raised,
   },
   newShellText: { color: palette.signal, fontFamily: type.monoMedium, fontSize: 13 },
+  forwardButton: {
+    minWidth: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: palette.rule,
+    borderRadius: radius.sm,
+    backgroundColor: palette.deep,
+  },
+  forwardButtonText: { color: palette.copper, fontFamily: type.monoStrong, fontSize: 13 },
   loginButton: { borderColor: palette.copperMuted, borderWidth: 1, borderRadius: radius.sm, paddingHorizontal: space.md, paddingVertical: space.sm },
   loginButtonPreferred: { borderColor: palette.copper, backgroundColor: palette.raised },
   loginButtonActive: { borderColor: palette.signal, backgroundColor: palette.raised },

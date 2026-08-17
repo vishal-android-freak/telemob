@@ -16,6 +16,8 @@ publisher before installing it.
 - Node metadata and terminal bytes authorized by that proxy.
 - Per-profile node favorites, recent connection timestamps, preferred SSH
   logins, and saved node-list filters.
+- Per-profile saved local-forward definitions, plus temporary SSH private keys,
+  certificates, and Teleport host authorities used to authorize active forwards.
 - Clipboard text only after the user invokes paste.
 
 Passwords and TOTP codes are not persisted. Telemob can save multiple Teleport
@@ -27,11 +29,22 @@ confirmed expired/rejected session clears authentication while retaining the
 profile's connection settings for reauthentication. Transient connectivity
 failures do not erase saved authentication.
 
+Forwarding passwords, TOTP codes, and passkey assertions are not persisted.
+The temporary SSH private key is generated on the device and stored only inside
+the same encrypted profile snapshot as the web session. Forgetting a profile
+also removes its saved forwarding definitions.
+
 ## Network destinations
 
 Native builds connect directly to the Teleport proxy address supplied by the
 user. Browser MFA opens a page on that proxy in the system browser and uses an
 encrypted local loopback callback to return the result to Telemob.
+
+When the user starts a local TCP forward, Telemob listens only on
+`127.0.0.1` on the phone. Local apps that connect to that port send traffic over
+an SSH `direct-tcpip` channel through the selected Teleport node to the remote
+host and port chosen by the user. Telemob does not bind forwarding listeners to
+Wi-Fi, cellular, VPN, or other externally reachable interfaces.
 
 The current application contains no Telemob-operated account service, traffic
 relay, advertising SDK, analytics SDK, or crash-reporting SDK. Expo/EAS is used
@@ -46,8 +59,8 @@ configuration and policies. Telemob does not control that retention.
 
 - Secure storage protects the restorable session using Android or iOS platform
   facilities.
-- Android notification permission controls how the active terminal foreground
-  service is surfaced by the operating system.
+- Android notification permission controls how the active terminal/forwarding
+  foreground service is surfaced by the operating system.
 - Clipboard contents are requested only through the Paste action.
 - The system browser handles Browser MFA and applies its own DNS, certificate,
   cookie, and privacy behavior.

@@ -33,6 +33,8 @@ before relying on it for critical access.
   profile naming, switching, and removal.
 - RBAC-filtered node discovery with per-profile favorites, recents, preferred
   SSH logins, remembered filters, and multiple sort modes.
+- Role-authorized local TCP forwarding through a selected Teleport SSH node,
+  with multiple simultaneous loopback listeners and saved per-profile rules.
 - Interactive PTY sessions over Teleport's authenticated WebSocket transport.
 - Multiple concurrent terminal tabs with independent connection state, parser
   state, scrollback, dimensions, and unread activity.
@@ -62,6 +64,14 @@ own sequenced output and bounded replay window; on resume, Telemob fills missed
 output, checks liveness, and reconnects with a fresh terminal parser when
 necessary. No tmux, screen, Mosh, agent, or other target-server software is
 required.
+
+Local forwards are likewise owned below the React screens. Every listener binds
+only to `127.0.0.1` on the phone and opens standard SSH `direct-tcpip` channels
+through the selected Teleport node. Telemob never exposes a listener to the
+phone's Wi-Fi or cellular interfaces. Starting a forward requires a temporary
+Teleport SSH certificate; its generated private key and certificate are kept in
+the encrypted profile snapshot until the certificate expires. Passwords and
+TOTP codes are never saved.
 
 ## Requirements
 
@@ -140,6 +150,8 @@ requires the proxy certificate to be trusted by the phone's browser.
 - SSH nodes only; application, database, Kubernetes, and desktop access are not
   implemented.
 - No file transfer, agent forwarding, session joining, or per-session MFA.
+- Local forwarding currently supports TCP only; remote and dynamic/SOCKS
+  forwarding are not implemented.
 - iOS background execution is bounded by the operating system and cannot
   guarantee an indefinitely live socket.
 - The web build is a UI preview and cannot connect to a real cluster.

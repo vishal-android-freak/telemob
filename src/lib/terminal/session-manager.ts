@@ -1,5 +1,19 @@
 import { AppState, Platform, type AppStateStatus } from 'react-native';
 
+import {
+  getConnectivitySnapshot,
+  subscribeConnectivity,
+  type ConnectivitySnapshot,
+} from '@/lib/network/connectivity';
+import {
+  classifyConnectionError,
+  type ConnectionIssue,
+  type ConnectionIssueKind,
+} from '@/lib/network/recovery';
+import {
+  isAbortError,
+  runWithConnectionRetry,
+} from '@/lib/network/retry';
 import { getTeleportClient, type TeleportClient } from '@/lib/teleport/client';
 import { recordNodeConnection } from '@/lib/teleport/node-preferences';
 import {
@@ -30,6 +44,9 @@ export type TerminalSessionSnapshot = {
   sessionId: string;
   state: TerminalConnectionState;
   error: string;
+  connectionIssueKind?: ConnectionIssueKind;
+  retryable: boolean;
+  retryAttempt: number;
   alternateScreen: boolean;
   mouseTracking: boolean;
   terminalTitle: string;
@@ -55,6 +72,8 @@ export class TerminalSessionController {
   private sessionId = '';
   private state: TerminalConnectionState = 'idle';
   private error = '';
+  private connectionIssue: ConnectionIssue | null = null;
+  private retryAttempt = 0;
   private alternateScreen = false;
   private mouseTracking = false;
   private terminalTitle = '';
@@ -72,6 +91,8 @@ export class TerminalSessionController {
   private queuedEvents: Extract<TerminalEvent, { type: 'data' }>[] = [];
   private resizeTimer?: ReturnType<typeof setTimeout>;
   private resumePending = false;
+  private connectionAbort?: AbortController;
+  private lastEventIssue?: ConnectionIssue;
 
   constructor(
     readonly tabId: string,
@@ -88,6 +109,9 @@ export class TerminalSessionController {
     sessionId: this.sessionId,
     state: this.state,
     error: this.error,
+    connectionIssueKind: this.connectionIssue?.kind,
+    retryable: this.connectionIssue?.retryable ?? false,
+    retryAttempt: this.retryAttempt,
     alternateScreen: this.alternateScreen,
     mouseTracking: this.mouseTracking,
     terminalTitle: this.terminalTitle,
@@ -207,6 +231,8 @@ export class TerminalSessionController {
 
   async disconnect() {
     this.connectionAttempt += 1;
+    this.connectionAbort?.abort();
+    this.connectionAbort = undefined;
     const sessionId = this.sessionId;
     if (this.resizeTimer) {
       clearTimeout(this.resizeTimer);
@@ -220,6 +246,8 @@ export class TerminalSessionController {
     this.resetTerminalState();
     this.state = 'closed';
     this.error = '';
+    this.connectionIssue = null;
+    this.retryAttempt = 0;
     this.publish();
     try {
       if (sessionId) await this.client.closeSession(sessionId);
@@ -229,7 +257,7 @@ export class TerminalSessionController {
   }
 
   handleEvent(event: TerminalEvent) {
-    if (event.type === 'session') return;
+    if (event.type === 'session' || event.type === 'forward') return;
     if (!this.sessionId || event.sessionId !== this.sessionId) return;
     if (event.type === 'data') {
       this.updateModes(event);
@@ -249,11 +277,35 @@ export class TerminalSessionController {
       return;
     }
     if (event.type === 'error') {
-      this.setError(event.message);
+      this.lastEventIssue = classifyConnectionError(
+        event.message,
+        getConnectivitySnapshot()
+      );
+      this.error = this.lastEventIssue.message;
+      this.connectionIssue = this.lastEventIssue;
+      this.publish();
       return;
     }
-    this.state = 'closed';
-    this.error = event.reason || '';
+    const reason = event.reason || 'Remote session closed';
+    const expectedClose = /remote session closed|closed on device/i.test(reason);
+    const issue = this.lastEventIssue ?? classifyConnectionError(
+      reason,
+      getConnectivitySnapshot()
+    );
+    this.lastEventIssue = undefined;
+    this.sessionId = '';
+    if (!expectedClose && issue.retryable) {
+      this.state = 'reconnecting';
+      this.error = issue.message;
+      this.connectionIssue = issue;
+      this.publish();
+      if (isAppActive(AppState.currentState)) void this.connect('resume');
+      else this.resumePending = true;
+      return;
+    }
+    this.state = issue.retryable ? 'closed' : 'error';
+    this.error = expectedClose ? reason : issue.message;
+    this.connectionIssue = expectedClose ? null : issue;
     this.publish();
   }
 
@@ -276,19 +328,51 @@ export class TerminalSessionController {
     void this.checkExistingSession();
   }
 
+  handleConnectivityChange(
+    previous: ConnectivitySnapshot,
+    next: ConnectivitySnapshot
+  ) {
+    if (
+      !this.started
+      || previous.generation === next.generation
+      || !next.available
+      || !isAppActive(AppState.currentState)
+    ) {
+      return;
+    }
+    if (this.state === 'connected') {
+      void this.checkExistingSession();
+      return;
+    }
+    if (this.state === 'error' && this.connectionIssue?.retryable) {
+      void this.retry();
+    }
+  }
+
   focus(focused: boolean) {
     if (!this.sessionId || this.state !== 'connected') return;
     void this.client.sendTerminalFocus(this.sessionId, focused).catch(() => undefined);
   }
 
   dispose() {
+    this.connectionAbort?.abort();
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     this.listeners.clear();
   }
 
+  retry() {
+    if (!this.started) return Promise.resolve();
+    this.connectionIssue = null;
+    this.retryAttempt = 0;
+    return this.connect('resume');
+  }
+
   private async connect(mode: 'initial' | 'resume') {
     if (!isAppActive(AppState.currentState)) return;
-    const attempt = ++this.connectionAttempt;
+    this.connectionAbort?.abort();
+    const controller = new AbortController();
+    this.connectionAbort = controller;
+    const generation = ++this.connectionAttempt;
     const staleSession = this.sessionId;
     this.sessionId = '';
     this.lastSequence = 0;
@@ -296,6 +380,9 @@ export class TerminalSessionController {
     this.resetTerminalState();
     this.state = mode === 'resume' ? 'reconnecting' : 'connecting';
     this.error = '';
+    this.connectionIssue = null;
+    this.retryAttempt = 0;
+    this.lastEventIssue = undefined;
     this.publish();
     if (staleSession) void this.client.closeSession(staleSession);
 
@@ -306,26 +393,64 @@ export class TerminalSessionController {
         tabId: this.tabId,
         profileId: this.profileId,
       };
-      const session = await withSavedProfile(
-        this.profileId,
-        client => client.openSession(target)
-      );
-      if (attempt !== this.connectionAttempt || !isAppActive(AppState.currentState)) {
-        void this.client.closeSession(session.id);
-        return;
-      }
+      await runWithConnectionRetry(
+        async retryAttempt => {
+          if (retryAttempt > 1) {
+            this.lastSequence = 0;
+            this.queuedEvents = [];
+            this.outputSync = undefined;
+            this.resetTerminalState();
+          }
+          const session = await withSavedProfile(
+            this.profileId,
+            client => client.openSession(target)
+          );
+          if (
+            controller.signal.aborted
+            || generation !== this.connectionAttempt
+            || !isAppActive(AppState.currentState)
+          ) {
+            void this.client.closeSession(session.id);
+            throw cancelledError();
+          }
 
-      this.sessionId = session.id;
-      this.state = 'checking';
-      this.publish();
-      const output = await this.syncOutput(session.id);
-      if (attempt !== this.connectionAttempt || this.sessionId !== session.id) return;
-      if (!output.open) {
-        throw new Error(output.error || output.reason || 'The terminal closed while connecting.');
-      }
-      await this.client.resizeSession(session.id, this.size.columns, this.size.rows);
+          this.sessionId = session.id;
+          this.state = 'checking';
+          this.publish();
+          try {
+            const output = await this.syncOutput(session.id);
+            if (generation !== this.connectionAttempt || this.sessionId !== session.id) {
+              throw cancelledError();
+            }
+            if (!output.open) {
+              throw new Error(output.error || output.reason || 'The terminal closed while connecting.');
+            }
+            await this.client.resizeSession(session.id, this.size.columns, this.size.rows);
+            return session;
+          } catch (error) {
+            if (this.sessionId === session.id) this.sessionId = '';
+            void this.client.closeSession(session.id);
+            throw error;
+          }
+        },
+        {
+          maxAttempts: 5,
+          signal: controller.signal,
+          onRetry: progress => {
+            if (generation !== this.connectionAttempt || controller.signal.aborted) return;
+            this.state = 'reconnecting';
+            this.error = progress.issue.message;
+            this.connectionIssue = progress.issue;
+            this.retryAttempt = progress.nextAttempt;
+            this.publish();
+          },
+        }
+      );
+      if (generation !== this.connectionAttempt || controller.signal.aborted) return;
       this.state = 'connected';
       this.error = '';
+      this.connectionIssue = null;
+      this.retryAttempt = 0;
       this.publish();
       void recordNodeConnection(this.profileId, {
         serverId: this.target.serverId,
@@ -334,16 +459,34 @@ export class TerminalSessionController {
       }).catch(() => undefined);
       if (this.workspace.isActive(this.tabId)) this.focus(true);
     } catch (error) {
-      if (attempt !== this.connectionAttempt) return;
+      if (
+        generation !== this.connectionAttempt
+        || controller.signal.aborted
+        || isAbortError(error)
+      ) {
+        return;
+      }
+      const issue = classifyConnectionError(error, getConnectivitySnapshot());
       this.sessionId = '';
       this.state = 'error';
-      this.error = messageFrom(error);
+      this.error = issue.message;
+      this.connectionIssue = issue;
+      this.retryAttempt = 0;
       this.publish();
+    } finally {
+      if (this.connectionAbort === controller) this.connectionAbort = undefined;
     }
   }
 
   private async checkExistingSession() {
     if (!this.started || !isAppActive(AppState.currentState)) return;
+    if (
+      this.state === 'connecting'
+      || this.state === 'checking'
+      || this.state === 'reconnecting'
+    ) {
+      return;
+    }
     const sessionId = this.sessionId;
     if (!sessionId) {
       await this.connect('resume');
@@ -360,6 +503,8 @@ export class TerminalSessionController {
       if (this.sessionId !== sessionId) return;
       this.state = 'connected';
       this.error = '';
+      this.connectionIssue = null;
+      this.retryAttempt = 0;
       this.publish();
       if (this.workspace.isActive(this.tabId)) this.focus(true);
     } catch {
@@ -445,10 +590,12 @@ export class TerminalWorkspaceManager {
   private readonly listeners = new Set<WorkspaceListener>();
   private activeTabId?: string;
   private previousAppState: AppStateStatus | null = AppState.currentState;
+  private previousConnectivity = getConnectivitySnapshot();
 
   constructor() {
     this.client.subscribe(event => this.handleEvent(event));
     AppState.addEventListener('change', nextState => this.handleAppState(nextState));
+    subscribeConnectivity(next => this.handleConnectivity(next));
   }
 
   getSnapshot = (): TerminalWorkspaceSnapshot => ({
@@ -556,6 +703,7 @@ export class TerminalWorkspaceManager {
       ).catch(() => undefined);
       return;
     }
+    if (event.type === 'forward') return;
     for (const tab of this.tabs.values()) {
       if (tab.getSnapshot().sessionId === event.sessionId) {
         tab.handleEvent(event);
@@ -568,6 +716,14 @@ export class TerminalWorkspaceManager {
     const previous = this.previousAppState;
     this.previousAppState = nextState;
     for (const tab of this.tabs.values()) tab.handleAppState(previous, nextState);
+  }
+
+  private handleConnectivity(next: ConnectivitySnapshot) {
+    const previous = this.previousConnectivity;
+    this.previousConnectivity = next;
+    for (const tab of this.tabs.values()) {
+      tab.handleConnectivityChange(previous, next);
+    }
   }
 }
 
@@ -595,4 +751,10 @@ function isAppActive(state: AppStateStatus | null) {
 
 function messageFrom(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function cancelledError() {
+  const error = new Error('Terminal connection was cancelled.');
+  error.name = 'AbortError';
+  return error;
 }

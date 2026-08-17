@@ -19,6 +19,10 @@ changes, and contributor interest.
 - [x] Multiple encrypted saved Teleport profiles with naming, switching,
   deletion, per-profile TLS/auth preferences, and no persisted passwords or
   TOTP codes.
+- [x] Multiple local TCP forwards through role-authorized Teleport SSH nodes,
+  loopback-only listeners, temporary on-device SSH identities, saved per-profile
+  rules, Android foreground-service ownership, and best-effort iOS background
+  retention.
 
 ### Favorites, recents, and node organization
 
@@ -29,14 +33,15 @@ changes, and contributor interest.
 
 ### Connection recovery and session lifetime UX
 
-- Detect Wi-Fi, cellular, and general network-path changes.
-- Retry transient failures with bounded exponential backoff.
-- Distinguish proxy unavailability, DNS failure, TLS failure, authorization
+- [x] Detect Wi-Fi, cellular, VPN, and general network-path changes.
+- [x] Retry transient failures with bounded exponential backoff.
+- [x] Distinguish proxy unavailability, DNS failure, TLS failure, authorization
   denial, and confirmed login expiry.
-- Preserve saved authentication during transient failures.
-- Display certificate or login expiry and provide a controlled reauthentication
+- [x] Preserve saved authentication during transient failures.
+- [x] Display certificate or login expiry and provide a controlled reauthentication
   flow without unexpectedly replacing navigation state.
-- Retain the existing pull-to-refresh and explicit Retry recovery paths.
+- [x] Retain pull-to-refresh, explicit Retry, and automatic recovery when the
+  device moves onto a new usable network path.
 
 ### Browser-based SSO
 
@@ -147,13 +152,6 @@ this work is implemented.
 
 - [Teleport session recording](https://goteleport.com/docs/reference/architecture/session-recording/)
 
-### Local port forwarding
-
-Support role-authorized local TCP forwarding for temporarily reaching internal
-web services or database endpoints from the phone. This requires careful
-handling of platform sandboxing, foreground execution, notification state, and
-network changes.
-
 ## Deferred scope
 
 The following areas are intentionally deferred until the mobile SSH experience
@@ -164,6 +162,7 @@ is complete and dependable:
 - Windows desktop access.
 - A general-purpose local Unix shell.
 - SSH agent forwarding.
+- Remote forwarding and dynamic/SOCKS forwarding.
 - Mosh or server-side tmux integration.
 
 These features would substantially expand Telemob's security surface and product

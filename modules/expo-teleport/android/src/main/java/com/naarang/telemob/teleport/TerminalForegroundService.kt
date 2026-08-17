@@ -18,10 +18,10 @@ class TerminalForegroundService : Service() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       val channel = NotificationChannel(
         CHANNEL_ID,
-        "Active terminals",
+        "Active connections",
         NotificationManager.IMPORTANCE_LOW
       ).apply {
-        description = "Keeps active Telemob SSH terminals connected"
+        description = "Keeps active Telemob SSH terminals and port forwards connected"
         setShowBadge(false)
       }
       getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
@@ -40,13 +40,20 @@ class TerminalForegroundService : Service() {
         showForegroundNotification()
       }
       ACTION_UPDATE -> {
-        if (sessionSnapshot().isEmpty()) stopTerminalService() else showForegroundNotification()
+        if (connectionCount() == 0) stopTerminalService() else showForegroundNotification()
+      }
+      ACTION_START_FORWARD -> {
+        val forwardID = intent.getStringExtra(EXTRA_FORWARD_ID) ?: return START_NOT_STICKY
+        registerForward(forwardID, intent.getStringExtra(EXTRA_TARGET).orEmpty())
+        showForegroundNotification()
       }
       ACTION_DISCONNECT -> {
         val sessions = sessionSnapshot()
         sessions.keys.forEach(TeleportCoreHolder.core::closeSession)
         sessions.keys.forEach(NativeTerminalRegistry::close)
+        TeleportCoreHolder.core.stopAllLocalForwards()
         clearSessions()
+        clearForwards()
         stopTerminalService()
       }
     }
@@ -57,11 +64,13 @@ class TerminalForegroundService : Service() {
 
   private fun showForegroundNotification() {
     val sessions = sessionSnapshot()
-    if (sessions.isEmpty()) {
+    val forwards = forwardSnapshot()
+    if (sessions.isEmpty() && forwards.isEmpty()) {
       stopTerminalService()
       return
     }
-    val active = sessions.values.last()
+    val activeTerminal = sessions.values.lastOrNull()
+    val activeForward = forwards.values.lastOrNull()
     val stopIntent = PendingIntent.getService(
       this,
       1,
@@ -74,7 +83,7 @@ class TerminalForegroundService : Service() {
       @Suppress("DEPRECATION")
       Notification.Builder(this)
     }
-    val contentIntent = active.tabID.takeIf(String::isNotBlank)?.let { tabID ->
+    val contentIntent = activeTerminal?.tabID?.takeIf(String::isNotBlank)?.let { tabID ->
       PendingIntent.getActivity(
         this,
         2,
@@ -91,12 +100,14 @@ class TerminalForegroundService : Service() {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
       )
     }
-    val count = sessions.size
-    val title = if (count == 1) "Telemob terminal active" else "$count Telemob terminals active"
-    val detail = if (count == 1) {
-      active.target.ifBlank { "SSH connection is running" }
+    val count = sessions.size + forwards.size
+    val title = if (count == 1) "Telemob connection active" else "$count Telemob connections active"
+    val detail = if (count == 1 && activeTerminal != null) {
+      activeTerminal.target.ifBlank { "SSH connection is running" }
+    } else if (count == 1 && activeForward != null) {
+      activeForward.target.ifBlank { "Port forwarding is running" }
     } else {
-      "$count SSH sessions · ${active.target.ifBlank { "latest terminal" }}"
+      "${sessions.size} terminals · ${forwards.size} port forwards"
     }
     val actionLabel = if (count == 1) "Disconnect" else "Disconnect all"
     val notification = notificationBuilder
@@ -138,16 +149,20 @@ class TerminalForegroundService : Service() {
 
   companion object {
     private data class ActiveTerminal(val target: String, val tabID: String)
+    private data class ActiveForward(val target: String)
 
     private const val CHANNEL_ID = "telemob_terminal"
     private const val NOTIFICATION_ID = 2401
     private const val ACTION_START = "com.naarang.telemob.terminal.START"
     private const val ACTION_UPDATE = "com.naarang.telemob.terminal.UPDATE"
+    private const val ACTION_START_FORWARD = "com.naarang.telemob.forward.START"
     private const val ACTION_DISCONNECT = "com.naarang.telemob.terminal.DISCONNECT"
     private const val EXTRA_SESSION_ID = "session_id"
     private const val EXTRA_TARGET = "target"
     private const val EXTRA_TAB_ID = "tab_id"
+    private const val EXTRA_FORWARD_ID = "forward_id"
     private val activeSessions = linkedMapOf<String, ActiveTerminal>()
+    private val activeForwards = linkedMapOf<String, ActiveForward>()
 
     fun start(context: Context, sessionID: String, target: String, tabID: String) {
       val intent = Intent(context, TerminalForegroundService::class.java)
@@ -160,7 +175,7 @@ class TerminalForegroundService : Service() {
 
     fun release(context: Context, sessionID: String) {
       synchronized(activeSessions) { activeSessions.remove(sessionID) }
-      if (sessionSnapshot().isEmpty()) {
+      if (connectionCount() == 0) {
         context.stopService(Intent(context, TerminalForegroundService::class.java))
       } else {
         dispatch(
@@ -172,7 +187,36 @@ class TerminalForegroundService : Service() {
 
     fun stop(context: Context) {
       clearSessions()
+      clearForwards()
       context.stopService(Intent(context, TerminalForegroundService::class.java))
+    }
+
+    fun startForward(context: Context, forwardID: String, target: String) {
+      dispatch(
+        context,
+        Intent(context, TerminalForegroundService::class.java)
+          .setAction(ACTION_START_FORWARD)
+          .putExtra(EXTRA_FORWARD_ID, forwardID)
+          .putExtra(EXTRA_TARGET, target)
+      )
+    }
+
+    fun releaseForward(context: Context, forwardID: String) {
+      synchronized(activeForwards) { activeForwards.remove(forwardID) }
+      if (connectionCount() == 0) {
+        context.stopService(Intent(context, TerminalForegroundService::class.java))
+      } else {
+        dispatch(context, Intent(context, TerminalForegroundService::class.java).setAction(ACTION_UPDATE))
+      }
+    }
+
+    fun releaseAllForwards(context: Context) {
+      clearForwards()
+      if (connectionCount() == 0) {
+        context.stopService(Intent(context, TerminalForegroundService::class.java))
+      } else {
+        dispatch(context, Intent(context, TerminalForegroundService::class.java).setAction(ACTION_UPDATE))
+      }
     }
 
     private fun register(sessionID: String, target: String, tabID: String) {
@@ -185,8 +229,24 @@ class TerminalForegroundService : Service() {
     private fun sessionSnapshot(): LinkedHashMap<String, ActiveTerminal> =
       synchronized(activeSessions) { LinkedHashMap(activeSessions) }
 
+    private fun registerForward(forwardID: String, target: String) {
+      synchronized(activeForwards) {
+        activeForwards.remove(forwardID)
+        activeForwards[forwardID] = ActiveForward(target)
+      }
+    }
+
+    private fun forwardSnapshot(): LinkedHashMap<String, ActiveForward> =
+      synchronized(activeForwards) { LinkedHashMap(activeForwards) }
+
+    private fun connectionCount(): Int = sessionSnapshot().size + forwardSnapshot().size
+
     private fun clearSessions() {
       synchronized(activeSessions) { activeSessions.clear() }
+    }
+
+    private fun clearForwards() {
+      synchronized(activeForwards) { activeForwards.clear() }
     }
 
     private fun dispatch(context: Context, intent: Intent) {
