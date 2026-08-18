@@ -44,6 +44,16 @@ export function saveForwardRule(request: LocalForwardRequest) {
   });
 }
 
+export function updateForwardRule(
+  profileId: string,
+  ruleId: string,
+  request: LocalForwardRequest
+) {
+  return updateRules(profileId, rules => rules.map(rule =>
+    rule.id === ruleId ? { ...rule, ...request, id: rule.id, createdAt: rule.createdAt } : rule
+  ));
+}
+
 export function removeForwardRule(profileId: string, ruleId: string) {
   return updateRules(profileId, rules => rules.filter(rule => rule.id !== ruleId));
 }

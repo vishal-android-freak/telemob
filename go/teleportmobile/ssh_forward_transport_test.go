@@ -10,12 +10,23 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
+)
+
+type forwardProxyTransport int
+
+const (
+	forwardProxyPlain forwardProxyTransport = iota
+	forwardProxyDirectTLS
+	forwardProxyConnectionUpgrade
 )
 
 type directTCPIPRequest struct {
@@ -30,14 +41,18 @@ type subsystemRequest struct {
 }
 
 func TestTeleportForwardDialerEndToEnd(t *testing.T) {
-	testTeleportForwardDialerEndToEnd(t, false)
+	testTeleportForwardDialerEndToEnd(t, forwardProxyPlain)
 }
 
 func TestTeleportForwardDialerTLSRoutingEndToEnd(t *testing.T) {
-	testTeleportForwardDialerEndToEnd(t, true)
+	testTeleportForwardDialerEndToEnd(t, forwardProxyDirectTLS)
 }
 
-func testTeleportForwardDialerEndToEnd(t *testing.T, tlsRouting bool) {
+func TestTeleportForwardDialerConnectionUpgradeEndToEnd(t *testing.T) {
+	testTeleportForwardDialerEndToEnd(t, forwardProxyConnectionUpgrade)
+}
+
+func testTeleportForwardDialerEndToEnd(t *testing.T, transport forwardProxyTransport) {
 	t.Helper()
 	caSigner := testSSHSigner(t)
 	proxyHostSigner := testHostCertificateSigner(t, caSigner, "proxy.example.com")
@@ -48,11 +63,16 @@ func testTeleportForwardDialerEndToEnd(t *testing.T, tlsRouting bool) {
 	node := startForwardNodeServer(t, nodeHostSigner)
 	expectedSubsystem := "proxy:node-id:0@default@root"
 	var proxy string
-	if tlsRouting {
+	switch transport {
+	case forwardProxyDirectTLS:
 		proxy = startTLSForwardProxyServer(t, proxyHostSigner, node, expectedSubsystem)
 		identity.TLSRoutingEnabled = true
 		identity.Insecure = true
-	} else {
+	case forwardProxyConnectionUpgrade:
+		proxy = startConnectionUpgradeForwardProxyServer(t, proxyHostSigner, node, expectedSubsystem)
+		identity.TLSRoutingEnabled = true
+		identity.Insecure = true
+	default:
 		proxy = startForwardProxyServer(t, proxyHostSigner, node, expectedSubsystem)
 	}
 	identity.SSHProxyAddress = proxy
@@ -251,6 +271,62 @@ func startTLSForwardProxyServer(t *testing.T, hostSigner ssh.Signer, nodeAddress
 	t.Cleanup(func() { _ = tlsListener.Close() })
 	serveForwardProxy(tlsListener, testSSHServerConfig(hostSigner), nodeAddress, expectedSubsystem)
 	return listener.Addr().String()
+}
+
+func startConnectionUpgradeForwardProxyServer(t *testing.T, hostSigner ssh.Signer, nodeAddress, expectedSubsystem string) string {
+	t.Helper()
+	innerCertificate := testTLSCertificate(t)
+	upgrader := websocket.Upgrader{
+		Subprotocols: []string{teleportConnectionUpgradeALPN},
+		CheckOrigin:  func(*http.Request) bool { return true },
+	}
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != teleportConnectionUpgradePath {
+			http.NotFound(response, request)
+			return
+		}
+		connection, err := upgrader.Upgrade(response, request, nil)
+		if err != nil {
+			return
+		}
+		stream := newWebsocketStreamConn(connection)
+		innerTLS := tls.Server(stream, &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{innerCertificate},
+		})
+		if err := innerTLS.Handshake(); err != nil {
+			_ = innerTLS.Close()
+			return
+		}
+		if negotiated := innerTLS.ConnectionState().NegotiatedProtocol; negotiated != "" {
+			t.Errorf("expected empty tunneled ALPN protocol, got %q", negotiated)
+			_ = innerTLS.Close()
+			return
+		}
+		handleForwardProxyConnection(innerTLS, testSSHServerConfig(hostSigner), nodeAddress, expectedSubsystem)
+	})
+	server := httptest.NewUnstartedServer(handler)
+	outerCertificate := testTLSCertificate(t)
+	server.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{outerCertificate},
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			for _, protocol := range hello.SupportedProtos {
+				if protocol == teleportProxySSHALPN {
+					// Model an L7 endpoint that accepts TLS but strips the
+					// custom ALPN value, producing NegotiatedProtocol == "".
+					return &tls.Config{
+						MinVersion:   tls.VersionTLS12,
+						Certificates: []tls.Certificate{outerCertificate},
+					}, nil
+				}
+			}
+			return nil, nil
+		},
+	}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	return server.Listener.Addr().String()
 }
 
 func serveForwardProxy(listener net.Listener, config *ssh.ServerConfig, nodeAddress, expectedSubsystem string) {

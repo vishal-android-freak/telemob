@@ -15,11 +15,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
 
-const teleportProxySSHALPN = "teleport-proxy-ssh"
+const (
+	teleportProxySSHALPN          = "teleport-proxy-ssh"
+	teleportConnectionUpgradePath = "/webapi/connectionupgrade"
+	teleportConnectionUpgradeALPN = "alpn-ping"
+)
 
 type teleportForwardDialer struct{}
 
@@ -37,6 +42,84 @@ func newTeleportProxyTLSConnection(connection net.Conn, serverName string, insec
 		NextProtos:         []string{teleportProxySSHALPN},
 		InsecureSkipVerify: insecure, // #nosec G402 -- explicit user opt-in matching tsh --insecure.
 	})
+}
+
+func dialTeleportProxyTransport(
+	ctx context.Context,
+	dialer *net.Dialer,
+	proxyAddress string,
+	serverName string,
+	insecure bool,
+) (net.Conn, error) {
+	raw, err := dialer.DialContext(ctx, "tcp", proxyAddress)
+	if err != nil {
+		return nil, fmt.Errorf("dial Teleport proxy: %w", err)
+	}
+	tlsConnection := newTeleportProxyTLSConnection(raw, serverName, insecure)
+	handshakeErr := tlsConnection.HandshakeContext(ctx)
+	if handshakeErr != nil && !strings.Contains(handshakeErr.Error(), "no application protocol") {
+		_ = raw.Close()
+		return nil, fmt.Errorf("negotiate Teleport SSH proxy: %w", handshakeErr)
+	}
+	negotiated := ""
+	if handshakeErr == nil {
+		negotiated = tlsConnection.ConnectionState().NegotiatedProtocol
+		if negotiated == teleportProxySSHALPN {
+			return tlsConnection, nil
+		}
+	}
+	_ = tlsConnection.Close()
+	if negotiated != "" {
+		return nil, fmt.Errorf("Teleport proxy selected unexpected ALPN protocol %q", negotiated)
+	}
+
+	// Layer 7 load balancers and reverse proxies commonly terminate the outer
+	// TLS connection and strip Teleport's custom ALPN value. tsh handles this by
+	// opening a standard WebSocket and performing the ALPN TLS handshake inside
+	// that tunnel. Keep the same behavior here so port forwards work through the
+	// same proxy topologies as tsh.
+	upgradeURL := url.URL{
+		Scheme: "wss",
+		Host:   proxyAddress,
+		Path:   teleportConnectionUpgradePath,
+	}
+	websocketDialer := websocket.Dialer{
+		HandshakeTimeout: requestTimeout,
+		NetDialContext:   dialer.DialContext,
+		Subprotocols:     []string{teleportConnectionUpgradeALPN},
+		TLSClientConfig: &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			ServerName:         serverName,
+			InsecureSkipVerify: insecure, // #nosec G402 -- explicit user opt-in matching tsh --insecure.
+		},
+	}
+	websocketConnection, response, err := websocketDialer.DialContext(ctx, upgradeURL.String(), nil)
+	if err != nil {
+		if response != nil {
+			if response.Body != nil {
+				_ = response.Body.Close()
+			}
+			return nil, fmt.Errorf("upgrade Teleport proxy connection (HTTP %d): %w", response.StatusCode, err)
+		}
+		return nil, fmt.Errorf("upgrade Teleport proxy connection: %w", err)
+	}
+	if selected := websocketConnection.Subprotocol(); selected != teleportConnectionUpgradeALPN {
+		_ = websocketConnection.Close()
+		return nil, fmt.Errorf("Teleport proxy selected unexpected connection-upgrade protocol %q", selected)
+	}
+
+	stream := newWebsocketStreamConn(websocketConnection)
+	innerTLS := newTeleportProxyTLSConnection(stream, serverName, true)
+	if err := innerTLS.HandshakeContext(ctx); err != nil {
+		_ = stream.Close()
+		return nil, fmt.Errorf("negotiate Teleport SSH proxy through connection upgrade: %w", err)
+	}
+	// Teleport routes this connection from the ALPN values in ClientHello before
+	// terminating TLS. The selected SSH handler may use a TLS config without
+	// NextProtos, so ConnectionState.NegotiatedProtocol can legitimately be
+	// empty even though the connection was routed to the SSH proxy. tsh likewise
+	// proceeds without requiring an echoed protocol after connection upgrade.
+	return innerTLS, nil
 }
 
 func (teleportForwardDialer) DialNode(ctx context.Context, identity *persistedSSHIdentity, request localForwardRequest) (forwardNodeClient, error) {
@@ -74,22 +157,17 @@ func (teleportForwardDialer) DialNode(ctx context.Context, identity *persistedSS
 	}
 
 	dialer := net.Dialer{Timeout: requestTimeout, KeepAlive: 30 * time.Second}
-	raw, err := dialer.DialContext(ctx, "tcp", proxyAddress)
-	if err != nil {
-		return nil, fmt.Errorf("dial Teleport proxy: %w", err)
-	}
-	proxyTransport := raw
+	var proxyTransport net.Conn
 	if identity.TLSRoutingEnabled {
-		tlsConnection := newTeleportProxyTLSConnection(raw, proxyURL.Hostname(), identity.Insecure)
-		if err := tlsConnection.HandshakeContext(ctx); err != nil {
-			_ = raw.Close()
-			return nil, fmt.Errorf("negotiate Teleport SSH proxy: %w", err)
+		proxyTransport, err = dialTeleportProxyTransport(ctx, &dialer, proxyAddress, proxyURL.Hostname(), identity.Insecure)
+	} else {
+		proxyTransport, err = dialer.DialContext(ctx, "tcp", proxyAddress)
+		if err != nil {
+			err = fmt.Errorf("dial Teleport proxy: %w", err)
 		}
-		if negotiated := tlsConnection.ConnectionState().NegotiatedProtocol; negotiated != teleportProxySSHALPN {
-			_ = tlsConnection.Close()
-			return nil, fmt.Errorf("Teleport proxy selected unexpected ALPN protocol %q", negotiated)
-		}
-		proxyTransport = tlsConnection
+	}
+	if err != nil {
+		return nil, err
 	}
 	proxyConnection, proxyChannels, proxyRequests, err := ssh.NewClientConn(proxyTransport, proxyAddress, sshConfig)
 	if err != nil {

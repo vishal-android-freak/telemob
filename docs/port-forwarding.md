@@ -19,6 +19,14 @@ devices on the same Wi-Fi network. Saved rules retain only node and address
 settings; they never start automatically and never contain a password, TOTP
 code, passkey assertion, cookie, or SSH private key.
 
+## Managing saved forwards
+
+- **Start** opens a listener from the saved settings.
+- **Edit** changes the saved name, destination host and port, or preferred local
+  port. Saving an edit does not restart or alter an active listener.
+- **×** asks for confirmation before removing the saved settings. Removing a
+  saved forward does not stop an active listener; use **Stop** for that.
+
 ## Transport and authorization
 
 Telemob generates an SSH key on the phone and asks the configured Teleport proxy
@@ -26,6 +34,14 @@ for a temporary user certificate. It verifies the proxy and node SSH host
 certificates against the host authorities returned by Teleport. TLS-routing and
 separate SSH-listener proxy configurations are both supported, including FIPS
 clusters.
+
+For TLS-routing proxies, Telemob first connects using Teleport's native
+`teleport-proxy-ssh` ALPN transport over TCP/TLS. If an HTTP reverse proxy
+accepts the connection but strips that custom ALPN value, Telemob falls back to
+Teleport's official `/webapi/connectionupgrade` WebSocket transport and performs
+the same TLS/SSH negotiation inside it. WebSocket is therefore a compatibility
+path, not the terminal renderer's local transport or the preferred forwarding
+path.
 
 The listener opens one SSH `direct-tcpip` channel through the selected node for
 each local client connection. Teleport and the node enforce the user's roles,

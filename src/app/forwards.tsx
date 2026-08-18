@@ -20,6 +20,7 @@ import {
   removeForwardRule,
   saveForwardRule,
   type SavedForwardRule,
+  updateForwardRule,
 } from '@/lib/teleport/forward-store';
 import { withSavedProfile } from '@/lib/teleport/profile-session';
 import { loadActiveSavedProfile } from '@/lib/teleport/profile-store';
@@ -57,9 +58,13 @@ export default function PortForwardsScreen() {
   const [password, setPassword] = useState('');
   const [totp, setTotp] = useState('');
   const [stopTarget, setStopTarget] = useState<LocalForward | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<SavedForwardRule | null>(null);
+  const [editingRule, setEditingRule] = useState<SavedForwardRule | null>(null);
+  const scrollRef = useRef<ScrollView>(null);
   const profileIdRef = useRef<string | null>(null);
 
   const selectedNode = Boolean(params.serverId && params.hostname && params.login);
+  const showForwardForm = selectedNode || Boolean(editingRule);
   const reload = useCallback(async () => {
     const nextProfile = await loadActiveSavedProfile();
     if (!nextProfile) {
@@ -104,7 +109,11 @@ export default function PortForwardsScreen() {
   }, [reload]);
 
   function buildRequest(): LocalForwardRequest | null {
-    if (!profile || !params.serverId || !params.hostname || !params.login) return null;
+    if (!profile) return null;
+    const serverId = editingRule?.serverId || params.serverId;
+    const hostname = editingRule?.hostname || params.hostname;
+    const login = editingRule?.login || params.login;
+    if (!serverId || !hostname || !login) return null;
     const parsedRemotePort = Number(remotePort);
     const parsedLocalPort = Number(localPort || '0');
     if (!Number.isInteger(parsedRemotePort) || parsedRemotePort < 1 || parsedRemotePort > 65535) {
@@ -120,16 +129,34 @@ export default function PortForwardsScreen() {
       return null;
     }
     return {
-      name: name.trim() || `${params.hostname}:${parsedRemotePort}`,
+      name: name.trim() || `${hostname}:${parsedRemotePort}`,
       profileId: profile.id,
-      serverId: params.serverId,
-      hostname: params.hostname,
-      login: params.login,
-      clusterName: params.clusterName || profile.profile.clusterName,
+      serverId,
+      hostname,
+      login,
+      clusterName: editingRule?.clusterName || params.clusterName || profile.profile.clusterName,
       remoteHost: remoteHost.trim(),
       remotePort: parsedRemotePort,
       localPort: parsedLocalPort,
     };
+  }
+
+  function resetForwardForm() {
+    setName('');
+    setRemoteHost('127.0.0.1');
+    setRemotePort('');
+    setLocalPort('0');
+    setEditingRule(null);
+  }
+
+  function beginEditingRule(rule: SavedForwardRule) {
+    setName(rule.name);
+    setRemoteHost(rule.remoteHost);
+    setRemotePort(String(rule.remotePort));
+    setLocalPort(String(rule.localPort));
+    setEditingRule(rule);
+    setError('');
+    requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: 0, animated: true }));
   }
 
   async function requestStart(request: LocalForwardRequest, save = false) {
@@ -154,7 +181,10 @@ export default function PortForwardsScreen() {
         client => client.startLocalForward(request)
       );
       setActive(current => [...current.filter(value => value.id !== started.id), started]);
-      if (save) setRules(await saveForwardRule(request));
+      if (save) {
+        setRules(await saveForwardRule(request));
+        resetForwardForm();
+      }
     } catch (startError) {
       setError(messageFrom(startError));
     } finally {
@@ -218,9 +248,35 @@ export default function PortForwardsScreen() {
     }
   }
 
-  async function deleteRule(rule: SavedForwardRule) {
-    if (!profile) return;
-    setRules(await removeForwardRule(profile.id, rule.id));
+  async function saveEditedRule() {
+    if (!profile || !editingRule) return;
+    const request = buildRequest();
+    if (!request) return;
+    setBusy(true);
+    setError('');
+    try {
+      setRules(await updateForwardRule(profile.id, editingRule.id, request));
+      resetForwardForm();
+    } catch (saveError) {
+      setError(messageFrom(saveError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteRule() {
+    if (!profile || !deleteTarget) return;
+    setBusy(true);
+    setError('');
+    try {
+      setRules(await removeForwardRule(profile.id, deleteTarget.id));
+      if (editingRule?.id === deleteTarget.id) resetForwardForm();
+      setDeleteTarget(null);
+    } catch (deleteError) {
+      setError(messageFrom(deleteError));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -233,6 +289,7 @@ export default function PortForwardsScreen() {
           contentContainerStyle={styles.content}
           keyboardDismissMode="interactive"
           keyboardShouldPersistTaps="handled"
+          ref={scrollRef}
         >
           <View style={styles.page}>
             <View style={styles.header}>
@@ -329,11 +386,13 @@ export default function PortForwardsScreen() {
               </Panel>
             ) : null}
 
-            {selectedNode && !pendingRequest ? (
+            {showForwardForm && !pendingRequest ? (
               <Panel style={styles.section}>
                 <View>
-                  <Text style={styles.sectionTitle}>New forward</Text>
-                  <Text style={styles.target}>{params.login}@{params.hostname}</Text>
+                  <Text style={styles.sectionTitle}>{editingRule ? 'Edit saved forward' : 'New forward'}</Text>
+                  <Text style={styles.target}>
+                    {editingRule ? `${editingRule.login}@${editingRule.hostname}` : `${params.login}@${params.hostname}`}
+                  </Text>
                 </View>
                 <View>
                   <FieldLabel>Name (optional)</FieldLabel>
@@ -357,12 +416,21 @@ export default function PortForwardsScreen() {
                 <PrimaryButton
                   loading={busy}
                   onPress={() => {
+                    if (editingRule) {
+                      void saveEditedRule();
+                      return;
+                    }
                     const request = buildRequest();
                     if (request) void requestStart(request, true);
                   }}
                 >
-                  Start & save
+                  {editingRule ? 'Save changes' : 'Start & save'}
                 </PrimaryButton>
+                {editingRule ? (
+                  <Pressable onPress={resetForwardForm} style={styles.secondaryButton}>
+                    <Text style={styles.secondaryText}>Cancel editing</Text>
+                  </Pressable>
+                ) : null}
               </Panel>
             ) : !pendingRequest ? (
               <Notice>Choose the ⇄ action beside a node login to create a new forward.</Notice>
@@ -408,7 +476,7 @@ export default function PortForwardsScreen() {
                   && (rule.localPort === 0 || forward.localPort === rule.localPort)
                 );
                 return (
-                  <Panel key={rule.id} style={styles.forwardCard}>
+                  <Panel key={rule.id} style={[styles.forwardCard, styles.savedForwardCard]}>
                     <View style={styles.forwardCopy}>
                       <Text numberOfLines={1} style={styles.forwardName}>{rule.name}</Text>
                       <Text style={styles.route}>
@@ -426,9 +494,19 @@ export default function PortForwardsScreen() {
                         <Text style={styles.startText}>{running ? 'Active' : 'Start'}</Text>
                       </Pressable>
                       <Pressable
+                        accessibilityLabel={`Edit saved forward ${rule.name}`}
+                        accessibilityRole="button"
+                        disabled={busy}
+                        onPress={() => beginEditingRule(rule)}
+                        style={({ pressed }) => [styles.editButton, pressed && styles.pressed]}
+                      >
+                        <Text style={styles.editText}>Edit</Text>
+                      </Pressable>
+                      <Pressable
                         accessibilityLabel={`Delete saved forward ${rule.name}`}
                         accessibilityRole="button"
-                        onPress={() => void deleteRule(rule)}
+                        disabled={busy}
+                        onPress={() => setDeleteTarget(rule)}
                         style={({ pressed }) => [styles.deleteButton, pressed && styles.pressed]}
                       >
                         <Text style={styles.deleteText}>×</Text>
@@ -442,6 +520,18 @@ export default function PortForwardsScreen() {
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
+      <ThemedConfirmDialog
+        busy={busy}
+        confirmLabel="Remove saved forward"
+        eyebrow="Remove saved profile"
+        message={deleteTarget
+          ? `This removes the saved settings for ${deleteTarget.name}. Any active listener keeps running until you stop it.`
+          : ''}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => void deleteRule()}
+        title={deleteTarget ? `Remove ${deleteTarget.name}?` : 'Remove saved forward?'}
+        visible={Boolean(deleteTarget)}
+      />
       <ThemedConfirmDialog
         busy={busy}
         confirmLabel="Stop forward"
@@ -499,6 +589,7 @@ const styles = StyleSheet.create({
   listSection: { gap: space.sm },
   listTitle: { color: palette.quiet, fontFamily: type.monoStrong, fontSize: 9, letterSpacing: 1.2, textTransform: 'uppercase' },
   forwardCard: { flexDirection: 'row', alignItems: 'center', gap: space.md },
+  savedForwardCard: { alignItems: 'stretch', flexDirection: 'column', gap: space.sm },
   forwardCopy: { flex: 1, minWidth: 0, gap: 4 },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: space.xs },
   statusDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: palette.signal },
@@ -507,9 +598,11 @@ const styles = StyleSheet.create({
   meta: { color: palette.quiet, fontFamily: type.mono, fontSize: 8 },
   stopButton: { borderColor: palette.danger, borderWidth: 1, borderRadius: radius.sm, paddingHorizontal: space.md, paddingVertical: space.sm },
   stopText: { color: palette.danger, fontFamily: type.monoStrong, fontSize: 9 },
-  ruleActions: { flexDirection: 'row', alignItems: 'center', gap: space.xs },
+  ruleActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: space.sm },
   startButton: { borderColor: palette.signal, borderWidth: 1, borderRadius: radius.sm, paddingHorizontal: space.md, paddingVertical: space.sm },
   startText: { color: palette.signal, fontFamily: type.monoStrong, fontSize: 9 },
+  editButton: { minHeight: 36, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space.xs },
+  editText: { color: palette.copper, fontFamily: type.monoStrong, fontSize: 9 },
   deleteButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
   deleteText: { color: palette.quiet, fontFamily: type.monoStrong, fontSize: 18 },
   empty: { color: palette.quiet, fontFamily: type.mono, fontSize: 10, paddingVertical: space.sm },
