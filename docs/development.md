@@ -70,7 +70,10 @@ Android terminal sessions share a foreground service that tracks every open
 session. Test one and multiple terminal counts, notification deep links,
 Disconnect/Disconnect all, closing a single tab while another remains,
 notification permission outcomes, app background/resume, and the in-app
-Disconnect button after native changes.
+Disconnect button after native changes. Also test a development-client reload:
+module teardown must close every terminal, forward, parser, and foreground
+service entry because the replacement JavaScript workspace cannot rehydrate
+them.
 
 Android builds support portrait and landscape. Pixel 10 remains the primary
 physical-device target, while the x86 and x86_64 bindings also support Android
@@ -102,6 +105,11 @@ XCFramework.
 
 The iOS target supports both iPhone and iPad. App Store releases therefore need
 current iPhone and iPad screenshots in App Store Connect.
+
+After lifecycle changes, repeat foreground/background cycles and a development-
+client reload. Each background assertion must be balanced, active connections
+must receive a new finite assertion on a later cycle, and bridge teardown must
+leave no native terminal or forward without a JavaScript owner.
 
 ## Responsive UI verification
 
@@ -138,6 +146,8 @@ Run all repository checks before opening a pull request:
 ```bash
 npm run typecheck
 npm run lint
+npm run test:network
+npm run test:terminal
 npm run test:go
 npm run build:core:android
 npm run build:terminal:android

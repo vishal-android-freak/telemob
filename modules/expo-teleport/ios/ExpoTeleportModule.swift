@@ -130,7 +130,11 @@ public final class ExpoTeleportModule: Module {
 
     OnDestroy {
       core.setEventSink(nil)
+      core.closeAllSessions()
+      core.stopAllLocalForwards()
+      NativeTerminalRegistry.shared.closeAll()
       BackgroundTerminalLease.shared.stopAll()
+      BrowserMFALease.shared.stop()
       browserMFARequests.removeAll()
     }
 

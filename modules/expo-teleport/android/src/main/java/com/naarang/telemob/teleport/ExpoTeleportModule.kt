@@ -131,6 +131,10 @@ class ExpoTeleportModule : Module() {
 
     OnDestroy {
       core.setEventSink(null)
+      core.closeAllSessions()
+      core.stopAllLocalForwards()
+      NativeTerminalRegistry.closeAll()
+      appContext.reactContext?.let(TerminalForegroundService::stop)
       browserMFARequests.clear()
     }
 

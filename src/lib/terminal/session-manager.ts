@@ -22,6 +22,7 @@ import {
   withSavedProfile,
 } from '@/lib/teleport/profile-session';
 import type { TerminalModifiers } from '@/lib/terminal/keys';
+import { assertTerminalTabCapacity } from '@/lib/terminal/workspace-limit';
 import type {
   SessionTarget,
   TerminalEvent,
@@ -615,6 +616,7 @@ export class TerminalWorkspaceManager {
   };
 
   createSession(profileId: string, target: SessionIdentity) {
+    assertTerminalTabCapacity(this.tabs.size);
     const tabId = createTabId();
     const controller = new TerminalSessionController(
       tabId,

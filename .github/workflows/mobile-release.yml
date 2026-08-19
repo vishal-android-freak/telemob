@@ -45,6 +45,8 @@ jobs:
         run: |
           npm run typecheck
           npm run lint
+          npm run test:network
+          npm run test:terminal
           npm run test:go
 
   android:

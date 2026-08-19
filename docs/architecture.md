@@ -165,14 +165,22 @@ one-shot modifiers for the next key, avoiding a prefix sequence such as
 
 The React terminal screen subscribes to a process-wide terminal workspace. Each
 tab has an independent controller, target, connection state, dimensions,
-unread state, native Ghostty parser, and replay cursor. Route unmounting or tab
-switching detaches the view but does not close SSH. The Go core assigns PTY
-frames a monotonic sequence and retains a bounded 1 MiB replay window for every
-active session below React. Active replay records are never evicted; completed
-session replay is bounded separately. On resume, every live controller fetches
-missed frames and pings its WebSocket. A failed check creates a new SSH session
-and a fresh native terminal so old output is not appended to a replacement
-shell.
+unread state, native Ghostty parser, and replay cursor. The workspace allows at
+most 10 tabs across all profiles, bounding active replay buffers and native
+parser state while still allowing concurrent work across nodes. Route
+unmounting or tab switching detaches the view but does not close SSH. The Go
+core assigns PTY frames a monotonic sequence and retains a bounded 1 MiB replay
+window for every active session below React. Active replay records are never
+evicted; completed session replay is bounded separately in close order,
+retaining the eight most recently closed sessions while React processes their
+final frames. On resume, every live controller fetches missed frames and pings
+its WebSocket. A failed check creates a new SSH session and a fresh native
+terminal so old output is not appended to a replacement shell.
+
+Destroying the React Native module is an explicit transport boundary. Both
+platform bridges close every SSH session, local forward, native parser, and
+background lease. A bridge reload therefore starts with an empty workspace
+instead of leaving native transports that JavaScript can no longer own.
 
 An unexpected terminal transport failure enters a bounded reconnect loop. A
 network change wakes that loop immediately; a final transient failure leaves a

@@ -767,6 +767,18 @@ func (w *webTransport) closeSession(sessionID string) {
 	})
 }
 
+func (w *webTransport) closeAllSessions() {
+	w.mu.Lock()
+	sessionIDs := make([]string, 0, len(w.terminals))
+	for sessionID := range w.terminals {
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	w.mu.Unlock()
+	for _, sessionID := range sessionIDs {
+		w.closeSession(sessionID)
+	}
+}
+
 func (w *webTransport) readTerminal(sessionID string, terminal *webTerminal) {
 	for {
 		messageType, data, err := terminal.conn.ReadMessage()
