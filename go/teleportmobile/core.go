@@ -38,8 +38,8 @@ type Core struct {
 }
 
 const (
-	maxSessionOutputBytes   = 1 << 20
-	maxSessionOutputRecords = 8
+	maxSessionOutputBytes         = 1 << 20
+	maxClosedSessionOutputRecords = 8
 	// These public, non-secret values activate local deterministic content for
 	// store review. They must never authenticate against an external service.
 	reviewerProxyAddress = "demo.telemob.invalid"
@@ -705,6 +705,7 @@ func (c *Core) emit(event map[string]any) {
 		case "closed":
 			record.Open = false
 			record.Reason, _ = event["reason"].(string)
+			c.pruneClosedSessionOutputsLocked()
 		}
 	}
 	sink := c.sink
@@ -736,12 +737,38 @@ func (c *Core) ensureSessionOutputLocked(sessionID string) *sessionOutputRecord 
 	record := &sessionOutputRecord{Open: true}
 	c.outputs[sessionID] = record
 	c.outputOrder = append(c.outputOrder, sessionID)
-	for len(c.outputOrder) > maxSessionOutputRecords {
-		oldest := c.outputOrder[0]
-		c.outputOrder = c.outputOrder[1:]
-		delete(c.outputs, oldest)
-	}
 	return record
+}
+
+// pruneClosedSessionOutputsLocked bounds only completed-session replay. Active
+// sessions must retain their sequence counter and replay buffer regardless of
+// how many tabs have been opened; evicting one would restart its sequence at 1
+// and make the existing native terminal reject all subsequent output as stale.
+func (c *Core) pruneClosedSessionOutputsLocked() {
+	closed := 0
+	for _, sessionID := range c.outputOrder {
+		if record := c.outputs[sessionID]; record != nil && !record.Open {
+			closed++
+		}
+	}
+	if closed <= maxClosedSessionOutputRecords {
+		return
+	}
+
+	kept := c.outputOrder[:0]
+	for _, sessionID := range c.outputOrder {
+		record := c.outputs[sessionID]
+		if record == nil {
+			continue
+		}
+		if !record.Open && closed > maxClosedSessionOutputRecords {
+			delete(c.outputs, sessionID)
+			closed--
+			continue
+		}
+		kept = append(kept, sessionID)
+	}
+	c.outputOrder = kept
 }
 
 func randomID(prefix string) (string, error) {

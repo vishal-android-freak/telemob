@@ -65,7 +65,9 @@ internal object NativeTerminalRegistry {
       "data" -> event.optString("data").takeIf(String::isNotEmpty)?.let { data ->
         feed(sessionId, event.optLong("sequence"), data.toByteArray(Charsets.UTF_8))
       }
-      "closed" -> close(sessionId)
+      // Keep the final parsed frame after transport closure. The workspace
+      // releases this parser explicitly when its terminal tab is disposed.
+      "closed" -> Unit
     }
   }
 

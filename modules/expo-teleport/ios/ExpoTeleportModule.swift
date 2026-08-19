@@ -130,7 +130,16 @@ public final class ExpoTeleportModule: Module {
 
     OnDestroy {
       core.setEventSink(nil)
+      BackgroundTerminalLease.shared.stopAll()
       browserMFARequests.removeAll()
+    }
+
+    OnAppEntersForeground {
+      BackgroundTerminalLease.shared.appEnteredForeground()
+    }
+
+    OnAppEntersBackground {
+      BackgroundTerminalLease.shared.appEnteredBackground()
     }
 
     AsyncFunction("getCapabilitiesAsync") {
@@ -509,10 +518,7 @@ private final class BackgroundTerminalLease {
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
       activeSessionIDs.insert(sessionID)
-      guard identifier == .invalid else { return }
-      identifier = UIApplication.shared.beginBackgroundTask(withName: "Telemob terminals") { [weak self] in
-        self?.stopAll()
-      }
+      beginTaskOnMainQueue()
     }
   }
 
@@ -536,6 +542,37 @@ private final class BackgroundTerminalLease {
       guard let self else { return }
       activeSessionIDs = Set(activeSessionIDs.filter { !$0.hasPrefix("forward:") })
       if activeSessionIDs.isEmpty { endTaskOnMainQueue() }
+    }
+  }
+
+  func appEnteredForeground() {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      // A UIKit background assertion is finite and belongs to one foreground /
+      // background cycle. Balance the previous assertion, then request the next
+      // one early while the app is foregrounded as Apple recommends.
+      endTaskOnMainQueue()
+      beginTaskOnMainQueue()
+    }
+  }
+
+  func appEnteredBackground() {
+    DispatchQueue.main.async { [weak self] in
+      // Normally the foreground callback or session registration requested the
+      // assertion already. This is a fallback for unusual lifecycle ordering.
+      self?.beginTaskOnMainQueue()
+    }
+  }
+
+  private func beginTaskOnMainQueue() {
+    guard !activeSessionIDs.isEmpty, identifier == .invalid else { return }
+    identifier = UIApplication.shared.beginBackgroundTask(
+      withName: "Telemob terminals"
+    ) { [weak self] in
+      // UIKit invokes this synchronously on the main thread. End the assertion
+      // before returning or iOS may terminate the process. Keep the active IDs
+      // so a later foreground transition can arm a fresh finite assertion.
+      self?.endTaskOnMainQueue()
     }
   }
 

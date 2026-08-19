@@ -3,6 +3,7 @@ package teleportmobile
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -268,5 +269,52 @@ func TestTerminalOutputBufferIsBounded(t *testing.T) {
 	}
 	if !snapshot.Truncated || len(snapshot.Chunks) != 1 || len(snapshot.Chunks[0].Data) != maxSessionOutputBytes {
 		t.Fatalf("output buffer was not bounded: truncated=%v chunks=%d", snapshot.Truncated, len(snapshot.Chunks))
+	}
+}
+
+func TestActiveTerminalOutputRecordsAreNeverEvicted(t *testing.T) {
+	core := NewDevelopmentCore()
+	core.prepareSessionOutput("session-oldest")
+	core.emit(map[string]any{
+		"type": "data", "sessionId": "session-oldest", "data": "one",
+	})
+
+	for index := 0; index < maxClosedSessionOutputRecords+4; index++ {
+		core.prepareSessionOutput(fmt.Sprintf("session-%d", index))
+	}
+	core.emit(map[string]any{
+		"type": "data", "sessionId": "session-oldest", "data": "two",
+	})
+
+	snapshotJSON, err := core.SessionOutputJSON("session-oldest", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot struct {
+		LatestSequence int64                `json:"latestSequence"`
+		Chunks         []sessionOutputChunk `json:"chunks"`
+	}
+	if err := json.Unmarshal([]byte(snapshotJSON), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.LatestSequence != 2 || len(snapshot.Chunks) != 2 {
+		t.Fatalf("active terminal output was evicted: %#v", snapshot)
+	}
+}
+
+func TestClosedTerminalOutputRecordsAreBounded(t *testing.T) {
+	core := NewDevelopmentCore()
+	for index := 0; index < maxClosedSessionOutputRecords+4; index++ {
+		sessionID := fmt.Sprintf("closed-%d", index)
+		core.prepareSessionOutput(sessionID)
+		core.emit(map[string]any{
+			"type": "closed", "sessionId": sessionID, "reason": "done",
+		})
+	}
+
+	core.mu.Lock()
+	defer core.mu.Unlock()
+	if len(core.outputs) != maxClosedSessionOutputRecords {
+		t.Fatalf("kept %d closed output records, want %d", len(core.outputs), maxClosedSessionOutputRecords)
 	}
 }
