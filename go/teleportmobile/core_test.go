@@ -3,6 +3,7 @@ package teleportmobile
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -268,5 +269,101 @@ func TestTerminalOutputBufferIsBounded(t *testing.T) {
 	}
 	if !snapshot.Truncated || len(snapshot.Chunks) != 1 || len(snapshot.Chunks[0].Data) != maxSessionOutputBytes {
 		t.Fatalf("output buffer was not bounded: truncated=%v chunks=%d", snapshot.Truncated, len(snapshot.Chunks))
+	}
+}
+
+func TestActiveTerminalOutputRecordsAreNeverEvicted(t *testing.T) {
+	core := NewDevelopmentCore()
+	core.prepareSessionOutput("session-oldest")
+	core.emit(map[string]any{
+		"type": "data", "sessionId": "session-oldest", "data": "one",
+	})
+
+	for index := 0; index < maxClosedSessionOutputRecords+4; index++ {
+		core.prepareSessionOutput(fmt.Sprintf("session-%d", index))
+	}
+	core.emit(map[string]any{
+		"type": "data", "sessionId": "session-oldest", "data": "two",
+	})
+
+	snapshotJSON, err := core.SessionOutputJSON("session-oldest", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot struct {
+		LatestSequence int64                `json:"latestSequence"`
+		Chunks         []sessionOutputChunk `json:"chunks"`
+	}
+	if err := json.Unmarshal([]byte(snapshotJSON), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.LatestSequence != 2 || len(snapshot.Chunks) != 2 {
+		t.Fatalf("active terminal output was evicted: %#v", snapshot)
+	}
+}
+
+func TestClosedTerminalOutputRecordsAreBounded(t *testing.T) {
+	core := NewDevelopmentCore()
+	for index := 0; index < maxClosedSessionOutputRecords+4; index++ {
+		sessionID := fmt.Sprintf("closed-%d", index)
+		core.prepareSessionOutput(sessionID)
+		core.emit(map[string]any{
+			"type": "closed", "sessionId": sessionID, "reason": "done",
+		})
+	}
+
+	core.mu.Lock()
+	defer core.mu.Unlock()
+	if len(core.outputs) != maxClosedSessionOutputRecords {
+		t.Fatalf("kept %d closed output records, want %d", len(core.outputs), maxClosedSessionOutputRecords)
+	}
+}
+
+func TestClosedTerminalOutputRecordsArePrunedByCloseOrder(t *testing.T) {
+	core := NewDevelopmentCore()
+	oldSessionID := "long-running"
+	core.prepareSessionOutput(oldSessionID)
+	core.emit(map[string]any{
+		"type": "data", "sessionId": oldSessionID, "data": "important final screen",
+	})
+
+	for index := 0; index < maxClosedSessionOutputRecords; index++ {
+		sessionID := fmt.Sprintf("short-%d", index)
+		core.prepareSessionOutput(sessionID)
+		core.emit(map[string]any{
+			"type": "closed", "sessionId": sessionID, "reason": "done",
+		})
+	}
+	core.emit(map[string]any{
+		"type": "closed", "sessionId": oldSessionID, "reason": "done",
+	})
+
+	if _, err := core.SessionOutputJSON(oldSessionID, 0); err != nil {
+		t.Fatalf("most recently closed session was pruned: %v", err)
+	}
+	if _, err := core.SessionOutputJSON("short-0", 0); err == nil {
+		t.Fatal("oldest closed session was retained after the replay limit")
+	}
+}
+
+func TestCloseAllSessionsKeepsAuthenticatedProfile(t *testing.T) {
+	core := NewDevelopmentCore()
+	core.profile = &authenticatedProfile{Username: "operator"}
+	for index := 0; index < 3; index++ {
+		sessionID := fmt.Sprintf("session-%d", index)
+		core.sessions[sessionID] = sessionTarget{Hostname: "node"}
+		core.inputs[sessionID] = "pending"
+		core.prepareSessionOutput(sessionID)
+	}
+
+	core.CloseAllSessions()
+
+	core.mu.Lock()
+	defer core.mu.Unlock()
+	if len(core.sessions) != 0 || len(core.inputs) != 0 {
+		t.Fatalf("terminal state survived teardown: sessions=%d inputs=%d", len(core.sessions), len(core.inputs))
+	}
+	if core.profile == nil || core.profile.Username != "operator" {
+		t.Fatal("closing transports invalidated the authenticated profile")
 	}
 }

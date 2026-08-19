@@ -397,8 +397,10 @@ final class NativeTerminalRegistry {
       if let value = event["data"] as? String, !value.isEmpty {
         feed(sessionID: sessionID, sequence: sequence, data: Data(value.utf8))
       }
+    // Keep the final parsed frame after transport closure. The workspace
+    // releases this parser explicitly when its terminal tab is disposed.
     case "closed":
-      close(sessionID: sessionID)
+      break
     default:
       break
     }

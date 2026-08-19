@@ -24,22 +24,22 @@ type EventSink interface {
 }
 
 type Core struct {
-	mu          sync.Mutex
-	sink        EventSink
-	web         *webTransport
-	development bool
-	reviewer    bool
-	challenges  map[string]loginRequest
-	profile     *authenticatedProfile
-	sessions    map[string]sessionTarget
-	inputs      map[string]string
-	outputs     map[string]*sessionOutputRecord
-	outputOrder []string
+	mu                sync.Mutex
+	sink              EventSink
+	web               *webTransport
+	development       bool
+	reviewer          bool
+	challenges        map[string]loginRequest
+	profile           *authenticatedProfile
+	sessions          map[string]sessionTarget
+	inputs            map[string]string
+	outputs           map[string]*sessionOutputRecord
+	closedOutputOrder []string
 }
 
 const (
-	maxSessionOutputBytes   = 1 << 20
-	maxSessionOutputRecords = 8
+	maxSessionOutputBytes         = 1 << 20
+	maxClosedSessionOutputRecords = 8
 	// These public, non-secret values activate local deterministic content for
 	// store review. They must never authenticate against an external service.
 	reviewerProxyAddress = "demo.telemob.invalid"
@@ -270,7 +270,7 @@ func (c *Core) Logout() {
 		c.web.logout()
 		c.mu.Lock()
 		c.outputs = make(map[string]*sessionOutputRecord)
-		c.outputOrder = nil
+		c.closedOutputOrder = nil
 		c.mu.Unlock()
 		return
 	}
@@ -280,7 +280,7 @@ func (c *Core) Logout() {
 	c.sessions = make(map[string]sessionTarget)
 	c.inputs = make(map[string]string)
 	c.outputs = make(map[string]*sessionOutputRecord)
-	c.outputOrder = nil
+	c.closedOutputOrder = nil
 	if !c.development {
 		c.reviewer = false
 	}
@@ -596,6 +596,25 @@ func (c *Core) CloseSession(sessionID string) {
 	c.emit(map[string]any{"type": "closed", "sessionId": sessionID, "reason": "Closed on device"})
 }
 
+// CloseAllSessions terminates every terminal transport without invalidating
+// the authenticated profile. Native module teardown uses this to ensure a
+// destroyed React bridge cannot leave SSH sessions with no JavaScript owner.
+func (c *Core) CloseAllSessions() {
+	if !c.usesDevelopmentTransport() {
+		c.web.closeAllSessions()
+		return
+	}
+	c.mu.Lock()
+	sessionIDs := make([]string, 0, len(c.sessions))
+	for sessionID := range c.sessions {
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	c.mu.Unlock()
+	for _, sessionID := range sessionIDs {
+		c.CloseSession(sessionID)
+	}
+}
+
 func isReviewerLogin(request loginRequest) bool {
 	return request.ProxyAddress == reviewerProxyAddress &&
 		request.Username == reviewerUsername &&
@@ -627,7 +646,7 @@ func (c *Core) setReviewerMode(enabled bool) {
 	c.sessions = make(map[string]sessionTarget)
 	c.inputs = make(map[string]string)
 	c.outputs = make(map[string]*sessionOutputRecord)
-	c.outputOrder = nil
+	c.closedOutputOrder = nil
 }
 
 func (c *Core) finishLogin(challengeID, method string) (string, error) {
@@ -703,8 +722,12 @@ func (c *Core) emit(event map[string]any) {
 		case "error":
 			record.Error, _ = event["message"].(string)
 		case "closed":
-			record.Open = false
+			if record.Open {
+				record.Open = false
+				c.closedOutputOrder = append(c.closedOutputOrder, sessionID)
+			}
 			record.Reason, _ = event["reason"].(string)
+			c.pruneClosedSessionOutputsLocked()
 		}
 	}
 	sink := c.sink
@@ -735,13 +758,21 @@ func (c *Core) ensureSessionOutputLocked(sessionID string) *sessionOutputRecord 
 	}
 	record := &sessionOutputRecord{Open: true}
 	c.outputs[sessionID] = record
-	c.outputOrder = append(c.outputOrder, sessionID)
-	for len(c.outputOrder) > maxSessionOutputRecords {
-		oldest := c.outputOrder[0]
-		c.outputOrder = c.outputOrder[1:]
-		delete(c.outputs, oldest)
-	}
 	return record
+}
+
+// pruneClosedSessionOutputsLocked bounds only completed-session replay. Active
+// sessions must retain their sequence counter and replay buffer regardless of
+// how many tabs have been opened; evicting one would restart its sequence at 1
+// and make the existing native terminal reject all subsequent output as stale.
+func (c *Core) pruneClosedSessionOutputsLocked() {
+	for len(c.closedOutputOrder) > maxClosedSessionOutputRecords {
+		oldest := c.closedOutputOrder[0]
+		c.closedOutputOrder = c.closedOutputOrder[1:]
+		if record := c.outputs[oldest]; record != nil && !record.Open {
+			delete(c.outputs, oldest)
+		}
+	}
 }
 
 func randomID(prefix string) (string, error) {

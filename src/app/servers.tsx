@@ -55,6 +55,10 @@ import {
   getTerminalWorkspaceManager,
   isActiveTerminalState,
 } from '@/lib/terminal/session-manager';
+import {
+  MAX_TERMINAL_TABS,
+  TerminalTabLimitError,
+} from '@/lib/terminal/workspace-limit';
 import type { SavedTeleportProfile, TeleportServer } from '@/types/teleport';
 
 export default function ServersScreen() {
@@ -265,18 +269,25 @@ export default function ServersScreen() {
 
   function openServer(server: TeleportServer, login: string, forceNew = false) {
     if (!savedProfile) return;
-    const session = (!forceNew
-      ? workspace.findSession(savedProfile.id, server.id, login)
-      : undefined)
-      ?? workspace.createSession(savedProfile.id, {
-        serverId: server.id,
-        hostname: server.hostname,
-        login,
+    try {
+      const session = (!forceNew
+        ? workspace.findSession(savedProfile.id, server.id, login)
+        : undefined)
+        ?? workspace.createSession(savedProfile.id, {
+          serverId: server.id,
+          hostname: server.hostname,
+          login,
+        });
+      router.push({
+        pathname: '/terminal/[serverId]',
+        params: { serverId: session.tabId },
       });
-    router.push({
-      pathname: '/terminal/[serverId]',
-      params: { serverId: session.tabId },
-    });
+    } catch (openError) {
+      if (openError instanceof TerminalTabLimitError) {
+        return;
+      }
+      setError(messageFrom(openError));
+    }
   }
 
   function openForward(server: TeleportServer, login: string) {
@@ -495,6 +506,12 @@ export default function ServersScreen() {
             <Notice>Offline store-review demo active. No external proxy is connected.</Notice>
           ) : null}
 
+        {terminalWorkspace.tabs.length >= MAX_TERMINAL_TABS ? (
+          <Notice tone="warning">
+            All {MAX_TERMINAL_TABS} terminal tabs are open. Disconnect one before starting another.
+          </Notice>
+        ) : null}
+
         {!connectivity.available ? (
           <Notice tone="warning">
             Device offline. Node discovery will continue when a network connection returns.
@@ -617,6 +634,7 @@ export default function ServersScreen() {
                     .filter(tab => tab.target.serverId === server.id)
                     .map(tab => tab.target.login)}
                   compact={layout.compact}
+                  atTerminalTabLimit={terminalWorkspace.tabs.length >= MAX_TERMINAL_TABS}
                   favorite={favoriteServerIds.has(server.id)}
                   key={server.id}
                   recent={nodePreferences.recentConnections[server.id]}
@@ -663,6 +681,7 @@ export default function ServersScreen() {
 
 function ServerCard({
   activeLogins,
+  atTerminalTabLimit,
   compact,
   favorite,
   recent,
@@ -673,6 +692,7 @@ function ServerCard({
   onOpenForward,
 }: {
   activeLogins: string[];
+  atTerminalTabLimit: boolean;
   compact: boolean;
   favorite: boolean;
   recent?: RecentNodePreference;
@@ -772,12 +792,17 @@ function ServerCard({
                 <Pressable
                   accessibilityLabel={activeCount ? `Open active ${login} session` : login}
                   accessibilityRole="button"
-                  accessibilityState={{ selected: activeCount > 0 }}
+                  accessibilityState={{
+                    disabled: atTerminalTabLimit && activeCount === 0,
+                    selected: activeCount > 0,
+                  }}
+                  disabled={atTerminalTabLimit && activeCount === 0}
                   onPress={() => onOpen(server, login)}
                   style={({ pressed }) => [
                     styles.loginButton,
                     preferred && styles.loginButtonPreferred,
                     activeCount > 0 && styles.loginButtonActive,
+                    atTerminalTabLimit && activeCount === 0 && styles.sessionButtonDisabled,
                     pressed && styles.pressed,
                   ]}
                 >
@@ -793,8 +818,14 @@ function ServerCard({
                   <Pressable
                     accessibilityLabel={`Open another ${login} session on ${server.hostname}`}
                     accessibilityRole="button"
+                    accessibilityState={{ disabled: atTerminalTabLimit }}
+                    disabled={atTerminalTabLimit}
                     onPress={() => onOpen(server, login, true)}
-                    style={({ pressed }) => [styles.newShellButton, pressed && styles.pressed]}
+                    style={({ pressed }) => [
+                      styles.newShellButton,
+                      atTerminalTabLimit && styles.sessionButtonDisabled,
+                      pressed && styles.pressed,
+                    ]}
                   >
                     <Text style={styles.newShellText}>＋</Text>
                   </Pressable>
@@ -1092,6 +1123,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.sm,
     backgroundColor: palette.raised,
   },
+  sessionButtonDisabled: { opacity: 0.35 },
   newShellText: { color: palette.signal, fontFamily: type.monoMedium, fontSize: 13 },
   forwardButton: {
     minWidth: 34,

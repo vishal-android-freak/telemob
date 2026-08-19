@@ -35,6 +35,7 @@ import {
   type TerminalSessionController,
   type TerminalWorkspaceManager,
 } from '@/lib/terminal/session-manager';
+import { MAX_TERMINAL_TABS } from '@/lib/terminal/workspace-limit';
 
 const SHELL_TERMINAL_FONT_SIZE = 7.5;
 const FULL_SCREEN_TERMINAL_FONT_SIZE = 11;
@@ -705,18 +706,20 @@ function TerminalScreen({
                   </Pressable>
                 </View>
               ))}
-              <Pressable
-                accessibilityLabel="Open another terminal"
-                accessibilityRole="button"
-                hitSlop={6}
-                onPress={() => router.back()}
-                style={({ pressed }) => [
-                  styles.newTabButton,
-                  pressed && styles.terminalTabPressed,
-                ]}
-              >
-                <Text style={styles.newTabText}>＋</Text>
-              </Pressable>
+              {terminalWorkspace.tabs.length < MAX_TERMINAL_TABS ? (
+                <Pressable
+                  accessibilityLabel="Open another terminal"
+                  accessibilityRole="button"
+                  hitSlop={6}
+                  onPress={() => router.back()}
+                  style={({ pressed }) => [
+                    styles.newTabButton,
+                    pressed && styles.terminalTabPressed,
+                  ]}
+                >
+                  <Text style={styles.newTabText}>＋</Text>
+                </Pressable>
+              ) : null}
             </ScrollView>
           </View>
 

@@ -62,6 +62,7 @@
     "lint": "expo lint",
     "typecheck": "tsc --noEmit",
     "test:network": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/lib/network/recovery.test.mjs",
+    "test:terminal": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/lib/terminal/workspace-limit.test.mjs",
     "test:go": "cd go/teleportmobile && go test ./...",
     "verify:android-native": "bash scripts/verify-android-native-libs.sh",
     "build:core:android": "bash scripts/build-go-core.sh android",

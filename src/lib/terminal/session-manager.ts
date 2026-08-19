@@ -22,6 +22,7 @@ import {
   withSavedProfile,
 } from '@/lib/teleport/profile-session';
 import type { TerminalModifiers } from '@/lib/terminal/keys';
+import { assertTerminalTabCapacity } from '@/lib/terminal/workspace-limit';
 import type {
   SessionTarget,
   TerminalEvent,
@@ -293,8 +294,10 @@ export class TerminalSessionController {
       getConnectivitySnapshot()
     );
     this.lastEventIssue = undefined;
-    this.sessionId = '';
     if (!expectedClose && issue.retryable) {
+      const closedSessionId = this.sessionId;
+      this.sessionId = '';
+      void this.client.closeSession(closedSessionId);
       this.state = 'reconnecting';
       this.error = issue.message;
       this.connectionIssue = issue;
@@ -357,6 +360,9 @@ export class TerminalSessionController {
   dispose() {
     this.connectionAbort?.abort();
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
+    const sessionId = this.sessionId;
+    this.sessionId = '';
+    if (sessionId) void this.client.closeSession(sessionId);
     this.listeners.clear();
   }
 
@@ -610,6 +616,7 @@ export class TerminalWorkspaceManager {
   };
 
   createSession(profileId: string, target: SessionIdentity) {
+    assertTerminalTabCapacity(this.tabs.size);
     const tabId = createTabId();
     const controller = new TerminalSessionController(
       tabId,
