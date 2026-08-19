@@ -129,13 +129,13 @@ jobs:
       - name: Install iOS pods
         run: pod install --project-directory=ios
 
-      - name: Compile Telemob for the iOS simulator
+      - name: Compile Telemob for iOS devices
         run: >-
           xcodebuild
           -workspace ios/Telemob.xcworkspace
           -scheme Telemob
           -configuration Release
-          -sdk iphonesimulator
-          -destination 'generic/platform=iOS Simulator'
+          -sdk iphoneos
+          -destination 'generic/platform=iOS'
           CODE_SIGNING_ALLOWED=NO
           build
